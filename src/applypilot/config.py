@@ -109,9 +109,130 @@ def load_search_config() -> dict:
         # Fall back to package-shipped example
         example = CONFIG_DIR / "searches.example.yaml"
         if example.exists():
-            return yaml.safe_load(example.read_text(encoding="utf-8"))
+            return _normalize_search_config(yaml.safe_load(example.read_text(encoding="utf-8")))
         return {}
-    return yaml.safe_load(SEARCH_CONFIG_PATH.read_text(encoding="utf-8"))
+    return _normalize_search_config(yaml.safe_load(SEARCH_CONFIG_PATH.read_text(encoding="utf-8")))
+
+
+def _clean_string_list(values: object) -> list[str]:
+    """Normalize YAML list-like values into non-empty strings."""
+    if not isinstance(values, list):
+        return []
+
+    cleaned: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        text = value if isinstance(value, str) else str(value)
+        text = text.strip()
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+def _normalize_search_config(raw_cfg: dict | None) -> dict:
+    """Map legacy/example search config shapes into discovery's expected schema."""
+    cfg = dict(raw_cfg or {})
+
+    defaults = dict(cfg.get("defaults") or {})
+
+    raw_queries = cfg.get("queries") or cfg.get("searches") or []
+    queries: list[dict] = []
+    for item in raw_queries:
+        if isinstance(item, str):
+            query = item.strip()
+            if query:
+                queries.append({"query": query, "tier": 1})
+            continue
+        if not isinstance(item, dict):
+            continue
+        query = item.get("query") or item.get("search")
+        if query is None:
+            continue
+        query_text = str(query).strip()
+        if not query_text:
+            continue
+        tier_raw = item.get("tier", 1)
+        try:
+            tier = int(tier_raw)
+        except (TypeError, ValueError):
+            tier = 1
+        normalized = dict(item)
+        normalized["query"] = query_text
+        normalized["tier"] = tier
+        queries.append(normalized)
+    cfg["queries"] = queries
+
+    raw_locations = cfg.get("locations") or []
+    locations: list[dict] = []
+    for item in raw_locations:
+        if isinstance(item, str):
+            location = item.strip()
+            if location:
+                locations.append({"label": location, "location": location, "remote": "remote" in location.lower()})
+            continue
+        if not isinstance(item, dict):
+            continue
+        location_value = item.get("location") or item.get("label")
+        if location_value is None:
+            continue
+        location = str(location_value).strip()
+        if not location:
+            continue
+        label_value = item.get("label", location)
+        label = str(label_value).strip() if label_value is not None else location
+        normalized = dict(item)
+        normalized["label"] = label or location
+        normalized["location"] = location
+        normalized["remote"] = bool(item.get("remote", False))
+        locations.append(normalized)
+
+    if not locations:
+        default_location = defaults.get("location")
+        if default_location is not None:
+            location = str(default_location).strip()
+            if location:
+                remote = bool(defaults.get("distance") == 0 or "remote" in location.lower())
+                locations.append({"label": location, "location": location, "remote": remote})
+    cfg["locations"] = locations
+
+    sites = _clean_string_list(cfg.get("sites"))
+    if not sites:
+        sites = _clean_string_list(cfg.get("boards"))
+    cfg["sites"] = sites or None
+
+    country = cfg.get("country_indeed")
+    if country is None:
+        country = cfg.get("country")
+    if country is not None:
+        defaults["country_indeed"] = str(country).strip().lower()
+    cfg["defaults"] = defaults
+
+    location_block = cfg.get("location") or {}
+    if not cfg.get("location_accept"):
+        cfg["location_accept"] = _clean_string_list(location_block.get("accept_patterns"))
+    else:
+        cfg["location_accept"] = _clean_string_list(cfg.get("location_accept"))
+    if not cfg.get("location_reject_non_remote"):
+        cfg["location_reject_non_remote"] = _clean_string_list(location_block.get("reject_patterns"))
+    else:
+        cfg["location_reject_non_remote"] = _clean_string_list(cfg.get("location_reject_non_remote"))
+
+    tiers = cfg.get("tiers")
+    if isinstance(tiers, list):
+        normalized_tiers: list[int] = []
+        for value in tiers:
+            try:
+                normalized_tiers.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        cfg["tiers"] = normalized_tiers or None
+
+    location_labels = cfg.get("location_labels")
+    if isinstance(location_labels, list):
+        cfg["location_labels"] = _clean_string_list(location_labels) or None
+
+    return cfg
 
 
 def load_sites_config() -> dict:

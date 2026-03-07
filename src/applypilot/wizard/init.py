@@ -466,7 +466,10 @@ def _setup_searches(profile: dict) -> None:
 
     target_role = profile.get("experience", {}).get("target_role", "Software Engineer")
 
-    location = Prompt.ask("Target location (e.g. 'Remote', 'Canada', 'New York, NY')", default="Remote")
+    location = Prompt.ask(
+        "Target location (use a real place like 'San Diego, CA' or 'Remote'; avoid 'Remote or Hybrid')",
+        default="Remote",
+    )
     distance_str = Prompt.ask("Search radius in miles (0 for remote-only)", default="0")
     try:
         distance = int(distance_str)

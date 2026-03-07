@@ -93,6 +93,42 @@ def _load_location_config(search_cfg: dict) -> tuple[list[str], list[str]]:
     return accept, reject
 
 
+def _coerce_distance(defaults: dict) -> int | None:
+    """Parse JobSpy distance from config defaults if present."""
+    raw_distance = defaults.get("distance")
+    if raw_distance in (None, ""):
+        return None
+    try:
+        distance = int(raw_distance)
+    except (TypeError, ValueError):
+        log.warning("Ignoring invalid JobSpy distance value: %r", raw_distance)
+        return None
+    return max(distance, 0)
+
+
+def _normalize_jobspy_target(search: dict, defaults: dict) -> tuple[str, bool, int | None]:
+    """Normalize location/remote flags into a JobSpy-friendly search target."""
+    raw_location = search.get("location")
+    location = str(raw_location).strip() if raw_location is not None else ""
+    remote = bool(search.get("remote"))
+    distance = _coerce_distance(defaults)
+
+    loc_lower = location.lower()
+    if "remote" in loc_lower and "hybrid" in loc_lower:
+        log.warning(
+            'JobSpy cannot reliably search the ambiguous location "%s" for query "%s". '
+            'Falling back to a remote search. Use a real metro/state in searches.yaml if you want hybrid/local jobs.',
+            location,
+            search.get("query", ""),
+        )
+        return "Remote", True, 0
+
+    if remote and distance is None:
+        distance = 0
+
+    return location, remote, distance
+
+
 def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> bool:
     """Check if a job location passes the user's location filter.
 
@@ -221,57 +257,61 @@ def _run_one_search(
     if "tier" in s:
         label += f" [tier {s['tier']}]"
 
-    # Split sites: Glassdoor needs simplified location, others use original
-    gd_location = glassdoor_map.get(s["location"], s["location"].split(",")[0])
-    has_glassdoor = "glassdoor" in sites
-    other_sites = [si for si in sites if si != "glassdoor"]
+    location, remote, distance = _normalize_jobspy_target(s, defaults)
+    distance_label = distance if distance is not None else "default"
+    log.info(
+        '[%s] Starting JobSpy search | normalized_location="%s" | remote=%s | distance=%s | sites=%s',
+        label,
+        location,
+        remote,
+        distance_label,
+        ", ".join(sites),
+    )
 
+    # Split sites: Glassdoor needs simplified location, others use original
+    gd_location = glassdoor_map.get(location, location.split(",")[0] if location else location)
     all_dfs = []
 
-    # Run non-Glassdoor sites with original location
-    if other_sites:
+    for site_name in sites:
+        site_location = gd_location if site_name == "glassdoor" else location
         kwargs = {
-            "site_name": other_sites,
+            "site_name": [site_name],
             "search_term": s["query"],
-            "location": s["location"],
+            "location": site_location,
             "results_wanted": results_per_site,
             "hours_old": hours_old,
             "description_format": "markdown",
-            "country_indeed": defaults.get("country_indeed", "usa"),
             "verbose": 0,
         }
-        if s.get("remote"):
+        if site_name != "glassdoor":
+            kwargs["country_indeed"] = defaults.get("country_indeed", "usa")
+        if distance is not None:
+            kwargs["distance"] = distance
+        if remote:
             kwargs["is_remote"] = True
         if proxy_config:
             kwargs["proxies"] = [proxy_config["jobspy"]]
-        if "linkedin" in other_sites:
+        if site_name == "linkedin":
             kwargs["linkedin_fetch_description"] = True
+        if site_name == "google":
+            kwargs["google_search_term"] = s["query"]
+
+        start = time.monotonic()
+        log.info(
+            '[%s] -> site=%s | location="%s" | remote=%s',
+            label,
+            site_name,
+            site_location,
+            remote,
+        )
         try:
             df = _scrape_with_retry(kwargs, max_retries=max_retries)
+            elapsed = time.monotonic() - start
+            log.info("[%s] <- site=%s done in %.1fs | rows=%d", label, site_name, elapsed, len(df))
             all_dfs.append(df)
         except Exception as e:
-            log.error("[%s] (non-gd): %s", label, e)
-
-    # Run Glassdoor separately with simplified location
-    if has_glassdoor:
-        gd_kwargs = {
-            "site_name": ["glassdoor"],
-            "search_term": s["query"],
-            "location": gd_location,
-            "results_wanted": results_per_site,
-            "hours_old": hours_old,
-            "description_format": "markdown",
-            "verbose": 0,
-        }
-        if s.get("remote"):
-            gd_kwargs["is_remote"] = True
-        if proxy_config:
-            gd_kwargs["proxies"] = [proxy_config["jobspy"]]
-        try:
-            gd_df = _scrape_with_retry(gd_kwargs, max_retries=max_retries)
-            all_dfs.append(gd_df)
-        except Exception as e:
-            log.error("[%s] (glassdoor): %s", label, e)
+            elapsed = time.monotonic() - start
+            log.error("[%s] <- site=%s failed after %.1fs: %s", label, site_name, elapsed, e)
 
     if not all_dfs:
         log.error("[%s]: all sites failed", label)
@@ -332,6 +372,12 @@ def search_jobs(
 
     proxy_config = parse_proxy(proxy) if proxy else None
 
+    defaults = {"distance": 0 if remote_only else None, "country_indeed": country_indeed}
+    location, remote_only, distance = _normalize_jobspy_target(
+        {"query": query, "location": location, "remote": remote_only},
+        defaults,
+    )
+
     log.info('Search: "%s" in %s | sites=%s | remote=%s', query, location, sites, remote_only)
 
     kwargs = {
@@ -345,6 +391,9 @@ def search_jobs(
         "verbose": 2,
     }
 
+    if distance is not None:
+        kwargs["distance"] = distance
+
     if remote_only:
         kwargs["is_remote"] = True
 
@@ -353,6 +402,8 @@ def search_jobs(
 
     if "linkedin" in sites:
         kwargs["linkedin_fetch_description"] = True
+    if "google" in sites:
+        kwargs["google_search_term"] = query
 
     try:
         df = scrape_jobs(**kwargs)
