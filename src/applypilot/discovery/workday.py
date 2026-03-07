@@ -544,13 +544,7 @@ def run_workday_discovery(employers: dict | None = None, workers: int = 1) -> di
     queries_cfg = search_cfg.get("queries", [])
     accept_locs, reject_locs = _load_location_filter(search_cfg)
 
-    # Default to tier 1-2 queries for workday scraping
-    max_tier = search_cfg.get("workday_max_tier", 2)
-    queries = [q["query"] for q in queries_cfg if q.get("tier", 99) <= max_tier]
-
-    if not queries:
-        # Fallback: use all queries
-        queries = [q["query"] for q in queries_cfg]
+    queries = [q["query"] for q in queries_cfg]
 
     if not queries:
         log.warning("No search queries configured in searches.yaml.")

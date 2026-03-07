@@ -142,7 +142,7 @@ def _normalize_search_config(raw_cfg: dict | None) -> dict:
         if isinstance(item, str):
             query = item.strip()
             if query:
-                queries.append({"query": query, "tier": 1})
+                queries.append({"query": query})
             continue
         if not isinstance(item, dict):
             continue
@@ -152,14 +152,10 @@ def _normalize_search_config(raw_cfg: dict | None) -> dict:
         query_text = str(query).strip()
         if not query_text:
             continue
-        tier_raw = item.get("tier", 1)
-        try:
-            tier = int(tier_raw)
-        except (TypeError, ValueError):
-            tier = 1
         normalized = dict(item)
         normalized["query"] = query_text
-        normalized["tier"] = tier
+        normalized.pop("search", None)
+        normalized.pop("tier", None)
         queries.append(normalized)
     cfg["queries"] = queries
 
@@ -217,16 +213,6 @@ def _normalize_search_config(raw_cfg: dict | None) -> dict:
         cfg["location_reject_non_remote"] = _clean_string_list(location_block.get("reject_patterns"))
     else:
         cfg["location_reject_non_remote"] = _clean_string_list(cfg.get("location_reject_non_remote"))
-
-    tiers = cfg.get("tiers")
-    if isinstance(tiers, list):
-        normalized_tiers: list[int] = []
-        for value in tiers:
-            try:
-                normalized_tiers.append(int(value))
-            except (TypeError, ValueError):
-                continue
-        cfg["tiers"] = normalized_tiers or None
 
     location_labels = cfg.get("location_labels")
     if isinstance(location_labels, list):

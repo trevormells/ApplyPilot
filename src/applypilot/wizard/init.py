@@ -499,9 +499,8 @@ def _setup_searches(profile: dict) -> None:
         "",
         "queries:",
     ]
-    for i, role in enumerate(roles):
+    for role in roles:
         lines.append(f'  - query: "{role}"')
-        lines.append(f"    tier: {min(i + 1, 3)}")
 
     SEARCH_CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
     console.print(f"[green]Search config saved to {SEARCH_CONFIG_PATH}[/green]")

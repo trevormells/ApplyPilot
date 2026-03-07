@@ -2,57 +2,31 @@
 # Copy to ~/.applypilot/searches.yaml and customize for your job search.
 # The wizard (applypilot init) generates a basic version automatically.
 
-# Search queries -- each has a query string and priority tier.
-# Tier 1: High-priority exact matches (searched first, highest precision)
-# Tier 2: Strong matches, broader scope
-# Tier 3: Wide net, high volume, lower precision
+# Search queries -- each item is searched the same way.
 queries:
   - query: "software engineer"
-    tier: 1
   - query: "backend engineer"
-    tier: 1
   - query: "backend developer"
-    tier: 1
   - query: "full stack developer"
-    tier: 2
   - query: "full stack engineer"
-    tier: 2
   - query: "python developer"
-    tier: 2
   - query: "python engineer"
-    tier: 2
   - query: "DevOps engineer"
-    tier: 2
   - query: "site reliability engineer"
-    tier: 2
   - query: "platform engineer"
-    tier: 2
   - query: "cloud engineer"
-    tier: 2
   - query: "data engineer"
-    tier: 2
   - query: "infrastructure engineer"
-    tier: 2
   - query: "software developer"
-    tier: 3
   - query: "developer"
-    tier: 3
   - query: "systems engineer"
-    tier: 3
   - query: "automation engineer"
-    tier: 3
   - query: "solutions engineer"
-    tier: 3
   - query: "integration engineer"
-    tier: 3
   - query: "ML engineer"
-    tier: 3
   - query: "machine learning engineer"
-    tier: 3
   - query: "AI engineer"
-    tier: 3
   - query: "security engineer"
-    tier: 3
 
 # Locations to search
 locations:

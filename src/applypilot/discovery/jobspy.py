@@ -254,8 +254,6 @@ def _run_one_search(
     """Run a single search query and store results in DB."""
     s = search
     label = f'"{s["query"]}" in {s["location"]} {"(remote)" if s.get("remote") else ""}'
-    if "tier" in s:
-        label += f" [tier {s['tier']}]"
 
     location, remote, distance = _normalize_jobspy_target(s, defaults)
     distance_label = distance if distance is not None else "default"
@@ -438,7 +436,6 @@ def search_jobs(
 
 def _full_crawl(
     search_cfg: dict,
-    tiers: list[int] | None = None,
     locations: list[str] | None = None,
     sites: list[str] | None = None,
     results_per_site: int = 100,
@@ -457,8 +454,6 @@ def _full_crawl(
     glassdoor_map = search_cfg.get("glassdoor_location_map", {})
     accept_locs, reject_locs = _load_location_config(search_cfg)
 
-    if tiers:
-        queries = [q for q in queries if q.get("tier") in tiers]
     if locations:
         locs = [loc for loc in locs if loc.get("label") in locations]
 
@@ -470,7 +465,6 @@ def _full_crawl(
                     "query": q["query"],
                     "location": loc["location"],
                     "remote": loc.get("remote", False),
-                    "tier": q.get("tier", 0),
                 }
             )
 
@@ -563,12 +557,10 @@ def run_discovery(cfg: dict | None = None) -> dict:
     sites = cfg.get("sites")
     results_per_site = cfg.get("defaults", {}).get("results_per_site", 100)
     hours_old = cfg.get("defaults", {}).get("hours_old", 72)
-    tiers = cfg.get("tiers")
     locations = cfg.get("location_labels")
 
     return _full_crawl(
         search_cfg=cfg,
-        tiers=tiers,
         locations=locations,
         sites=sites,
         results_per_site=results_per_site,
