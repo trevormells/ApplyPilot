@@ -14,6 +14,8 @@ Thank you for your interest in contributing to ApplyPilot. This guide covers eve
 ```bash
 git clone https://github.com/Pickle-Pixel/ApplyPilot.git
 cd ApplyPilot
+python3.13 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
 playwright install chromium
 ```

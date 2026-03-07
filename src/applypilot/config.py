@@ -45,7 +45,8 @@ def get_chrome_path() -> str:
     if system == "Windows":
         candidates = [
             Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Google/Chrome/Application/chrome.exe",
-            Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
+            / "Google/Chrome/Application/chrome.exe",
             Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
         ]
     elif system == "Darwin":
@@ -70,9 +71,7 @@ def get_chrome_path() -> str:
         if found:
             return found
 
-    raise FileNotFoundError(
-        "Chrome/Chromium not found. Install Chrome or set CHROME_PATH environment variable."
-    )
+    raise FileNotFoundError("Chrome/Chromium not found. Install Chrome or set CHROME_PATH environment variable.")
 
 
 def get_chrome_user_data() -> Path:
@@ -95,16 +94,16 @@ def ensure_dirs():
 def load_profile() -> dict:
     """Load user profile from ~/.applypilot/profile.json."""
     import json
+
     if not PROFILE_PATH.exists():
-        raise FileNotFoundError(
-            f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
-        )
+        raise FileNotFoundError(f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first.")
     return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
 
 def load_search_config() -> dict:
     """Load search configuration from ~/.applypilot/searches.yaml."""
     import yaml
+
     if not SEARCH_CONFIG_PATH.exists():
         # Fall back to package-shipped example
         example = CONFIG_DIR / "searches.example.yaml"
@@ -117,6 +116,7 @@ def load_search_config() -> dict:
 def load_sites_config() -> dict:
     """Load sites.yaml configuration (sites list, manual_ats, blocked, etc.)."""
     import yaml
+
     path = CONFIG_DIR / "sites.yaml"
     if not path.exists():
         return {}
@@ -175,6 +175,7 @@ DEFAULTS = {
 def load_env():
     """Load environment variables from ~/.applypilot/.env if it exists."""
     from dotenv import load_dotenv
+
     if ENV_PATH.exists():
         load_dotenv(ENV_PATH)
     # Also try CWD .env as fallback
@@ -208,8 +209,7 @@ def get_tier() -> int:
     load_env()
 
     has_provider_source = any(
-        os.environ.get(k)
-        for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL")
+        os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL")
     )
     has_model_and_generic_key = bool((os.environ.get("LLM_MODEL") or "").strip()) and bool(
         (os.environ.get("LLM_API_KEY") or "").strip()
@@ -243,12 +243,12 @@ def check_tier(required: int, feature: str) -> None:
         return
 
     from rich.console import Console
+
     _console = Console(stderr=True)
 
     missing: list[str] = []
     has_provider_source = any(
-        os.environ.get(k)
-        for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL")
+        os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL")
     )
     has_model_and_generic_key = bool((os.environ.get("LLM_MODEL") or "").strip()) and bool(
         (os.environ.get("LLM_API_KEY") or "").strip()
@@ -261,7 +261,9 @@ def check_tier(required: int, feature: str) -> None:
         )
     if required >= 3:
         if find_spec("browser_use") is None:
-            missing.append("browser-use — install with [bold]pip install -e .[/bold] or [bold]pip install browser-use[/bold]")
+            missing.append(
+                "browser-use — install with [bold]pip install -e .[/bold] or [bold]pip install browser-use[/bold]"
+            )
         try:
             get_chrome_path()
         except FileNotFoundError:

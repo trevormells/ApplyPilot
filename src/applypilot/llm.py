@@ -85,9 +85,7 @@ def _env_get(env: Mapping[str, str], key: str) -> str:
 def _provider_from_model(model: str) -> str:
     provider, _, model_name = model.partition("/")
     if not provider or not model_name:
-        raise RuntimeError(
-            "LLM_MODEL must include a provider prefix (for example 'openai/gpt-4o-mini')."
-        )
+        raise RuntimeError("LLM_MODEL must include a provider prefix (for example 'openai/gpt-4o-mini').")
     return provider
 
 
@@ -109,9 +107,7 @@ def _infer_provider_and_source(env: Mapping[str, str]) -> tuple[str, str] | None
     return None
 
 
-def _infer_provider_for_tier(
-    env: Mapping[str, str], model_tier: ModelTier
-) -> tuple[str, str] | None:
+def _infer_provider_for_tier(env: Mapping[str, str], model_tier: ModelTier) -> tuple[str, str] | None:
     inferred = _infer_provider_and_source(env)
     if inferred is not None:
         return inferred
@@ -122,9 +118,7 @@ def _infer_provider_for_tier(
     return None
 
 
-def resolve_llm_config(
-    env: Mapping[str, str] | None = None, *, model_tier: ModelTier = "default"
-) -> LLMConfig:
+def resolve_llm_config(env: Mapping[str, str] | None = None, *, model_tier: ModelTier = "default") -> LLMConfig:
     """Resolve LLM configuration from environment."""
     env_map = env if env is not None else os.environ
 
@@ -139,10 +133,7 @@ def resolve_llm_config(
             provider, _ = inferred
             model = f"{provider}/{model}"
         else:
-            raise RuntimeError(
-                f"{model_env_var} must include a provider prefix "
-                "(for example 'openai/gpt-4o-mini')."
-            )
+            raise RuntimeError(f"{model_env_var} must include a provider prefix (for example 'openai/gpt-4o-mini').")
     else:
         if not inferred:
             raise RuntimeError(
@@ -164,11 +155,7 @@ def resolve_llm_config(
     api_key = _env_get(env_map, api_key_env) or _env_get(env_map, "LLM_API_KEY")
 
     if not api_key and not local_url:
-        key_help = (
-            f"{api_key_env} or LLM_API_KEY"
-            if provider in provider_api_key_env
-            else "LLM_API_KEY"
-        )
+        key_help = f"{api_key_env} or LLM_API_KEY" if provider in provider_api_key_env else "LLM_API_KEY"
         raise RuntimeError(
             f"Missing credentials for model '{model}'. Set {key_help}, or set LLM_URL for "
             "a local OpenAI-compatible endpoint."

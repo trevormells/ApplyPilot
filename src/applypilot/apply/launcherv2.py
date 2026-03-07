@@ -23,9 +23,9 @@ from pathlib import Path
 
 from browser_use import Agent, Browser, ChatAnthropic, ChatGoogle, ChatOpenAI
 from browser_use.agent.views import (
-	AgentHistoryList,
-	AgentOutput,
-	AgentStructuredOutput,
+    AgentHistoryList,
+    AgentOutput,
+    AgentStructuredOutput,
 )
 
 from rich.console import Console
@@ -178,6 +178,7 @@ def _build_llm(model: str) -> object:
         return ChatOpenAI(model=model)
 
     raise ValueError(f"Unsupported model: {model}")
+
 
 def _format_last_action(agent_out: AgentOutput) -> str:
     """Format the last action from an AgentOutput into a short readable label."""

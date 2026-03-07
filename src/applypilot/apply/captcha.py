@@ -142,11 +142,7 @@ def build_captcha_tools() -> Tools:
             if status == "ready":
                 solution = poll_resp.get("solution", {})
                 # Different CAPTCHA types return the token under different keys.
-                token = (
-                    solution.get("gRecaptchaResponse")
-                    or solution.get("token")
-                    or solution.get("fcToken")
-                )
+                token = solution.get("gRecaptchaResponse") or solution.get("token") or solution.get("fcToken")
                 if token:
                     logger.info(
                         "CapSolver solved %s CAPTCHA (taskId=%s, attempt=%d)",
