@@ -161,7 +161,7 @@ def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    model: str = typer.Option("haiku", "--model", "-m", help="Claude model name."),
+    model: str = typer.Option("gemini-3-flash-preview", "--model", "-m", help="browser-use model hint."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
@@ -178,29 +178,29 @@ def apply(
     from applypilot.config import check_tier, PROFILE_PATH as _profile_path
     from applypilot.database import get_connection
 
-    # --- Utility modes (no Chrome/Claude needed) ---
+    # --- Utility modes (no browser run needed) ---
 
     if mark_applied:
-        from applypilot.apply.launcher import mark_job
+        from applypilot.apply.launcherv2 import mark_job
         mark_job(mark_applied, "applied")
         console.print(f"[green]Marked as applied:[/green] {mark_applied}")
         return
 
     if mark_failed:
-        from applypilot.apply.launcher import mark_job
+        from applypilot.apply.launcherv2 import mark_job
         mark_job(mark_failed, "failed", reason=fail_reason)
         console.print(f"[yellow]Marked as failed:[/yellow] {mark_failed} ({fail_reason or 'manual'})")
         return
 
     if reset_failed:
-        from applypilot.apply.launcher import reset_failed as do_reset
+        from applypilot.apply.launcherv2 import reset_failed as do_reset
         count = do_reset()
         console.print(f"[green]Reset {count} failed job(s) for retry.[/green]")
         return
 
     # --- Full apply mode ---
 
-    # Check 1: Tier 3 required (Claude Code CLI + Chrome)
+    # Check 1: Tier 3 required (browser-use + Chrome)
     check_tier(3, "auto-apply")
 
     # Check 2: Profile exists
@@ -225,7 +225,7 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcher import gen_prompt
+        from applypilot.apply.launcherv2 import gen_prompt
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
@@ -234,17 +234,11 @@ def apply(
         if not prompt_file:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
-        mcp_path = _profile_path.parent / ".mcp-apply-0.json"
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
-        console.print("\n[bold]Run manually:[/bold]")
-        console.print(
-            f"  claude --model {model} -p "
-            f"--mcp-config {mcp_path} "
-            f"--permission-mode bypassPermissions < {prompt_file}"
-        )
+        console.print("[dim]Prompt generation only. Launcher v2 no longer emits Claude MCP command output.[/dim]")
         return
 
-    from applypilot.apply.launcher import main as apply_main
+    from applypilot.apply.launcherv2 import main as apply_main
 
     effective_limit = limit if limit is not None else (0 if continuous else 1)
 
@@ -349,7 +343,6 @@ def dashboard() -> None:
 @app.command()
 def doctor() -> None:
     """Check your setup and diagnose missing requirements."""
-    import shutil
     from applypilot.config import (
         load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
         SEARCH_CONFIG_PATH, get_chrome_path,
@@ -414,13 +407,16 @@ def doctor() -> None:
         )
 
     # --- Tier 3 checks ---
-    # Claude Code CLI
-    claude_bin = shutil.which("claude")
-    if claude_bin:
-        results.append(("Claude Code CLI", ok_mark, claude_bin))
-    else:
-        results.append(("Claude Code CLI", fail_mark,
-                        "Install from https://claude.ai/code (needed for auto-apply)"))
+    # browser-use
+    try:
+        import browser_use  # noqa: F401
+
+        version = getattr(browser_use, "__version__", "installed")
+        results.append(("browser-use", ok_mark, f"{version}"))
+    except ImportError:
+        results.append(
+            ("browser-use", fail_mark, "Install with 'pip install -e .' or 'pip install browser-use'")
+        )
 
     # Chrome
     try:
@@ -429,14 +425,6 @@ def doctor() -> None:
     except FileNotFoundError:
         results.append(("Chrome/Chromium", fail_mark,
                         "Install Chrome or set CHROME_PATH env var (needed for auto-apply)"))
-
-    # Node.js / npx (for Playwright MCP)
-    npx_bin = shutil.which("npx")
-    if npx_bin:
-        results.append(("Node.js (npx)", ok_mark, npx_bin))
-    else:
-        results.append(("Node.js (npx)", fail_mark,
-                        "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
 
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")

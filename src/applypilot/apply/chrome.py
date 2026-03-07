@@ -187,13 +187,14 @@ def _suppress_restore_nag(profile_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def launch_chrome(worker_id: int, port: int | None = None,
-                  headless: bool = False) -> subprocess.Popen:
+                  headless: bool = False, start_url: str | None = None) -> subprocess.Popen:
     """Launch a Chrome instance with remote debugging for a worker.
 
     Args:
         worker_id: Numeric worker identifier.
         port: CDP port. Defaults to BASE_CDP_PORT + worker_id.
         headless: Run Chrome in headless mode (no visible window).
+        start_url: URL to open immediately on launch (saves an agent navigation step).
 
     Returns:
         subprocess.Popen handle for the Chrome process.
@@ -234,6 +235,9 @@ def launch_chrome(worker_id: int, port: int | None = None,
     ]
     if headless:
         cmd.append("--headless=new")
+
+    if start_url:
+        cmd.append(start_url)
 
     # On Unix, start in a new process group so we can kill the whole tree
     kwargs: dict = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
