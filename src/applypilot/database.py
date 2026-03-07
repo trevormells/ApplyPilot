@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import DB_PATH, load_blocked_sites
+from applypilot.config import DB_PATH, DEFAULTS, load_blocked_sites
 
 # Thread-local connection storage — each thread gets its own connection
 # (required for SQLite thread safety with parallel workers)
@@ -281,7 +281,16 @@ def get_pending_detail_blocked_breakdown(conn: sqlite3.Connection | None = None)
     return [(row[0], row[1]) for row in rows]
 
 
-def get_stats(conn: sqlite3.Connection | None = None) -> dict:
+def _count_rows(
+    conn: sqlite3.Connection,
+    where: str,
+    params: tuple[object, ...] = (),
+) -> int:
+    """Run a simple COUNT query against the jobs table."""
+    return int(conn.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).fetchone()[0])
+
+
+def get_stats(conn: sqlite3.Connection | None = None, min_score: int = DEFAULTS["min_score"]) -> dict:
     """Return job counts by pipeline stage.
 
     Provides a snapshot of how many jobs are at each stage, useful for
@@ -295,7 +304,9 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
             total, by_site, pending_detail, pending_detail_blocked,
             pending_detail_blocked_sites, with_description,
             scored, unscored, tailored, untailored_eligible,
-            with_cover_letter, applied, score_distribution
+            pending_cover, with_cover_letter, ready_to_apply,
+            applied, apply_in_progress, apply_failed, apply_manual,
+            score_distribution
     """
     if conn is None:
         conn = get_connection()
@@ -308,6 +319,7 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     # By site breakdown
     rows = conn.execute("SELECT site, COUNT(*) as cnt FROM jobs GROUP BY site ORDER BY cnt DESC").fetchall()
     stats["by_site"] = [(row[0], row[1]) for row in rows]
+    stats["source_count"] = len(stats["by_site"])
 
     # Enrichment stage
     stats["pending_detail"] = count_pending_detail(conn)
@@ -350,6 +362,15 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     ).fetchone()[0]
 
     # Cover letter stage
+    stats["pending_cover"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
+        "AND full_description IS NOT NULL "
+        "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
+        "AND COALESCE(cover_attempts, 0) < 5",
+        (min_score,),
+    ).fetchone()[0]
+
     stats["with_cover_letter"] = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE cover_letter_path IS NOT NULL"
     ).fetchone()[0]
@@ -371,6 +392,19 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "AND applied_at IS NULL "
         "AND application_url IS NOT NULL"
     ).fetchone()[0]
+
+    stats["apply_in_progress"] = _count_rows(conn, "apply_status = 'in_progress'")
+    stats["apply_failed"] = _count_rows(conn, "apply_status = 'failed'")
+    stats["apply_manual"] = _count_rows(conn, "apply_status = 'manual'")
+    stats["apply_status_breakdown"] = [
+        (row[0], row[1])
+        for row in conn.execute(
+            "SELECT COALESCE(apply_status, 'not_started') AS status, COUNT(*) AS cnt "
+            "FROM jobs "
+            "GROUP BY COALESCE(apply_status, 'not_started') "
+            "ORDER BY cnt DESC, status"
+        ).fetchall()
+    ]
 
     return stats
 
