@@ -24,6 +24,7 @@ from pathlib import Path
 from browser_use import Agent, Browser, ChatAnthropic, ChatGoogle, ChatOpenAI
 from browser_use.agent.views import (
 	AgentHistoryList,
+	AgentOutput,
 	AgentStructuredOutput,
 )
 
@@ -178,6 +179,41 @@ def _build_llm(model: str) -> object:
 
     raise ValueError(f"Unsupported model: {model}")
 
+def _format_last_action(agent_out: AgentOutput) -> str:
+    """Format the last action from an AgentOutput into a short readable label."""
+    if not agent_out or not agent_out.action:
+        return "thinking"
+    last = agent_out.action[-1]
+    action_dict = last.model_dump(exclude_none=True, mode="json")
+    action_name = next((k for k in action_dict if k != "interacted_element"), None)
+    if not action_name:
+        return "unknown"
+    params = action_dict.get(action_name) or {}
+    if not isinstance(params, dict):
+        return action_name.replace("_", " ")
+    if action_name in ("navigate", "go_to_url", "open_url"):
+        url = str(params.get("url", ""))
+        domain = url.split("/")[2] if "//" in url else url
+        return f"\u2192 {domain[:30]}"
+    if action_name in ("input_text", "type", "fill"):
+        text = str(params.get("text", params.get("value", "")))[:22]
+        return f"type: {text}"
+    if action_name in ("click", "click_element", "click_element_by_index"):
+        return "click"
+    if action_name == "scroll":
+        direction = "down" if params.get("down", True) else "up"
+        return f"scroll {direction}"
+    if action_name in ("done", "finish", "complete"):
+        text = str(params.get("text", params.get("message", "")))[:20]
+        return f"done: {text}" if text else "done"
+    if action_name in ("extract_content", "extract"):
+        return "extract"
+    if action_name in ("search_google", "search"):
+        query = str(params.get("query", ""))[:20]
+        return f"search: {query}"
+    return action_name.replace("_", " ")[:30]
+
+
 async def _run_browser_use_agent(
     task: str,
     worker_id: int,
@@ -185,6 +221,7 @@ async def _run_browser_use_agent(
     headless: bool,
     model: str,
     cancel_event: threading.Event,
+    cost_baseline: float = 0.0,
 ) -> AgentHistoryList[AgentStructuredOutput]:
     """Execute a browser-use agent and return the raw AgentHistoryList result."""
     cdp_url = f"http://127.0.0.1:{port}"
@@ -203,7 +240,16 @@ async def _run_browser_use_agent(
         def _on_step(*args):
             # browser_use callback signature: (browser_state, agent_output, step_number)
             step_n = next((a for a in args if isinstance(a, int)), 0)
-            update_state(worker_id, actions=step_n, last_action=f"step {step_n}")
+            agent_out = next((a for a in args if isinstance(a, AgentOutput)), None)
+            label = _format_last_action(agent_out) if agent_out else f"step {step_n}"
+            update_state(worker_id, actions=step_n, last_action=label)
+            add_event(f"[W{worker_id}] step {step_n}: {label}")
+            try:
+                running_cost = agent.history.usage.total_cost
+                if running_cost > 0:
+                    update_state(worker_id, total_cost=cost_baseline + running_cost)
+            except Exception:
+                pass
 
         if hasattr(agent, "register_new_step_callback"):
             agent.register_new_step_callback = _on_step
@@ -274,6 +320,9 @@ def run_job(
         f"{'=' * 60}\n"
     )
 
+    ws_before = get_state(worker_id)
+    cost_baseline = ws_before.total_cost if ws_before else 0.0
+
     start = time.time()
     cancel_event = threading.Event()
     with _active_lock:
@@ -288,6 +337,7 @@ def run_job(
                 headless=headless,
                 model=model,
                 cancel_event=cancel_event,
+                cost_baseline=cost_baseline,
             )
         )
         output = _extract_agent_output(result_obj)
@@ -325,15 +375,18 @@ def run_job(
         lf.write(output + "\n")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    job_log = config.LOG_DIR / f"browser_use_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
-    job_log.write_text(output, encoding="utf-8")
+    site_slug = job.get("site", "unknown")[:20]
+    job_log = config.LOG_DIR / f"browser_use_{ts}_w{worker_id}_{site_slug}.txt"
+    steps_text = "\n".join(result_obj.agent_steps())
+    job_log.write_text(
+        f"{output}\n\n{'=' * 60}\nAGENT HISTORY\n{'=' * 60}\n{steps_text}",
+        encoding="utf-8",
+    )
 
     if action_count > 0:
         update_state(worker_id, actions=action_count, last_action=f"{action_count} action(s)")
     if cost_usd > 0:
-        ws = get_state(worker_id)
-        prev_cost = ws.total_cost if ws else 0.0
-        update_state(worker_id, total_cost=prev_cost + cost_usd)
+        update_state(worker_id, total_cost=cost_baseline + cost_usd)
 
     def _clean_reason(s: str) -> str:
         return re.sub(r'[*`"]+$', "", s).strip()
@@ -459,7 +512,8 @@ def worker_loop(
         chrome_proc = None
         try:
             add_event(f"[W{worker_id}] Launching Chrome...")
-            chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
+            job_url = job.get("application_url") or job["url"]
+            chrome_proc = launch_chrome(worker_id, port=port, headless=headless, start_url=job_url)
 
             result, duration_ms = run_job(
                 job,
