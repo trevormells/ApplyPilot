@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import warnings
 
+from applypilot.apply.launcherv2 import *  # noqa: F401,F403
+
 warnings.warn(
     "applypilot.apply.launcher is deprecated; import applypilot.apply.launcherv2 instead.",
     DeprecationWarning,
     stacklevel=2,
 )
-
-from applypilot.apply.launcherv2 import *  # noqa: F401,F403

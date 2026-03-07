@@ -197,7 +197,6 @@ def _build_hard_rules(profile: dict) -> str:
     display_name = f"{preferred_name} {preferred_last}".strip() if preferred_last else preferred_name
 
     # Build work auth rule dynamically
-    auth_info = work_auth.get("legally_authorized_to_work", "")
     sponsorship = work_auth.get("require_sponsorship", "")
     permit_type = work_auth.get("work_permit_type", "")
 
@@ -219,7 +218,7 @@ def _build_hard_rules(profile: dict) -> str:
 
 def _build_captcha_section() -> str:
     """Build the CAPTCHA detection, solving, and injection instructions."""
-    return f"""== CAPTCHA ==
+    return """== CAPTCHA ==
 When ANY CAPTCHA appears: (1) run DETECT JS, (2) call solve_captcha tool, (3) run INJECT JS.
 Only use FALLBACK if solve_captcha returns "ERROR:".
 
@@ -371,11 +370,6 @@ def build_prompt(job: dict, tailored_resume: str, cover_letter: str | None = Non
     from applypilot.config import load_blocked_sso
 
     blocked_sso = load_blocked_sso()
-
-    # Preferred display name
-    preferred_name = personal.get("preferred_name", full_name.split()[0])
-    last_name = full_name.split()[-1] if " " in full_name else ""
-    display_name = f"{preferred_name} {last_name}".strip()
 
     # Dry-run: override submit instruction
     if dry_run:

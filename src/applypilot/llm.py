@@ -233,6 +233,22 @@ class LLMClient:
         """No-op. LiteLLM completion() is stateless per call."""
         return None
 
+    def ask(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 10000,
+        temperature: float | None = None,
+        **extra: Unpack[LiteLLMExtra],
+    ) -> str:
+        """Compatibility wrapper for older single-prompt callers."""
+        return self.chat(
+            [{"role": "user", "content": prompt}],
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+            **extra,
+        )
+
 
 _instances: dict[tuple[str, str | None, str, str], LLMClient] = {}
 
@@ -274,43 +290,61 @@ def validate_api_key(provider: str, api_key: str, model: str = "", endpoint: str
         (is_valid, error_message) - error_message is empty if valid
     """
     try:
+        env: dict[str, str] = {}
         if provider == "gemini":
-            base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-            test_model = model or "gemini-2.0-flash"
-            client = LLMClient(base_url, test_model, api_key)
+            env["GEMINI_API_KEY"] = api_key
+            env["LLM_MODEL"] = model or "gemini-2.0-flash"
         elif provider == "openai":
-            base_url = "https://api.openai.com/v1"
-            test_model = model or "gpt-4o-mini"
-            client = LLMClient(base_url, test_model, api_key)
+            env["OPENAI_API_KEY"] = api_key
+            env["LLM_MODEL"] = model or "gpt-4o-mini"
         elif provider == "local":
             if not endpoint:
                 return False, "Local endpoint URL is required"
-            base_url = endpoint.rstrip("/")
-            test_model = model or "local-model"
-            client = LLMClient(base_url, test_model, api_key)
+            env["LLM_URL"] = endpoint.rstrip("/")
+            env["LLM_MODEL"] = model or "local-model"
+            if api_key:
+                env["LLM_API_KEY"] = api_key
         else:
             return False, f"Unknown provider: {provider}"
 
-        # Simple test request
-        response = client.ask("Reply with only the word 'ok'.", temperature=0.0, max_tokens=10)
-        client.close()
+        config = resolve_llm_config(env)
 
-        if response and len(response.strip()) > 0:
+        # Simple test request
+        response = litellm.completion(
+            model=config.model,
+            messages=[{"role": "user", "content": "Reply with only the word 'ok'."}],
+            max_tokens=10,
+            temperature=0.0,
+            timeout=30,
+            num_retries=0,
+            drop_params=True,
+            api_key=config.api_key or None,
+            api_base=config.api_base or None,
+        )
+
+        choices = getattr(response, "choices", None)
+        content = choices[0].message.content if choices else ""
+        text = content.strip() if isinstance(content, str) else str(content).strip()
+
+        if text:
             return True, ""
         return False, "Empty response from API"
 
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 401:
-            return False, "Invalid API key"
-        elif e.response.status_code == 403:
-            return False, "API key lacks required permissions"
-        elif e.response.status_code == 429:
-            # Rate limited but key is valid
-            return True, ""
-        return False, f"API error: {e.response.status_code}"
-    except httpx.ConnectError:
+    except litellm.AuthenticationError:
+        return False, "Invalid API key"
+    except litellm.RateLimitError:
+        return True, ""
+    except litellm.APIConnectionError:
         return False, "Could not connect to API endpoint"
-    except httpx.TimeoutException:
+    except litellm.Timeout:
         return False, "API request timed out"
+    except litellm.APIError as e:
+        if e.status_code == 403:
+            return False, "API key lacks required permissions"
+        if e.status_code == 429:
+            return True, ""
+        return False, f"API error: {e.status_code}"
+    except litellm.BadRequestError as e:
+        return False, f"Invalid model or request: {e}"
     except Exception as e:
         return False, f"Validation failed: {str(e)}"
