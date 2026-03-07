@@ -51,16 +51,25 @@ def acquire_job(target_url: str | None = None, min_score: int = 7, worker_id: in
                 params.extend(blocked_patterns)
             row = conn.execute(
                 f"""
+                WITH ranked_jobs AS (
+                    SELECT url, title, site, application_url, tailored_resume_path,
+                           fit_score, location, full_description, cover_letter_path,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY COALESCE(NULLIF(TRIM(site), ''), url)
+                               ORDER BY fit_score DESC, url
+                           ) AS company_rank
+                    FROM jobs
+                    WHERE tailored_resume_path IS NOT NULL
+                      AND (apply_status IS NULL OR apply_status = 'failed')
+                      AND (apply_attempts IS NULL OR apply_attempts < ?)
+                      AND fit_score >= ?
+                      {site_clause}
+                      {url_clauses}
+                )
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
-                FROM jobs
-                WHERE tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status = 'failed')
-                  AND (apply_attempts IS NULL OR apply_attempts < ?)
-                  AND fit_score >= ?
-                  {site_clause}
-                  {url_clauses}
-                ORDER BY fit_score DESC, url
+                FROM ranked_jobs
+                ORDER BY company_rank, fit_score DESC, url
                 LIMIT 1
             """,
                 [config.DEFAULTS["max_apply_attempts"]] + params,
