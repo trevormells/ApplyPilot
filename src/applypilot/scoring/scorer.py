@@ -40,6 +40,16 @@ KEYWORDS: [comma-separated ATS keywords from the job description that match or c
 REASONING: [2-3 sentences explaining the score]"""
 
 
+def _job_value(job: dict | None, key: str, default: str = "") -> str:
+    """Safely read a string-ish field from a job dict."""
+    if not isinstance(job, dict):
+        return default
+    value = job.get(key, default)
+    if value is None:
+        return default
+    return str(value)
+
+
 def _parse_score_response(response: str) -> dict:
     """Parse the LLM's score response into structured data.
 
@@ -49,6 +59,13 @@ def _parse_score_response(response: str) -> dict:
     Returns:
         {"score": int, "keywords": str, "reasoning": str}
     """
+    if not isinstance(response, str):
+        return {
+            "score": 0,
+            "keywords": "",
+            "reasoning": f"Unexpected LLM response type: {type(response).__name__}",
+        }
+
     score = 0
     keywords = ""
     reasoning = response
@@ -69,6 +86,31 @@ def _parse_score_response(response: str) -> dict:
     return {"score": score, "keywords": keywords, "reasoning": reasoning}
 
 
+def _log_reasoning_snippet(reasoning: str, limit: int = 160) -> str:
+    """Collapse LLM reasoning to one line for per-job progress logs."""
+    compact = " ".join(reasoning.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 3].rstrip()}..."
+
+
+def _normalize_score_result(result: dict | None) -> dict:
+    """Normalize a scorer result or raise if the shape is invalid."""
+    if not isinstance(result, dict):
+        raise TypeError(f"score_job returned {type(result).__name__}, expected dict")
+
+    try:
+        score = int(result.get("score", 0) or 0)
+    except (TypeError, ValueError):
+        score = 0
+
+    return {
+        "score": max(0, min(10, score)),
+        "keywords": str(result.get("keywords", "") or ""),
+        "reasoning": str(result.get("reasoning", "") or ""),
+    }
+
+
 def score_job(resume_text: str, job: dict) -> dict:
     """Score a single job against the resume.
 
@@ -80,10 +122,10 @@ def score_job(resume_text: str, job: dict) -> dict:
         {"score": int, "keywords": str, "reasoning": str}
     """
     job_text = (
-        f"TITLE: {job['title']}\n"
-        f"COMPANY: {job['site']}\n"
-        f"LOCATION: {job.get('location', 'N/A')}\n\n"
-        f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
+        f"TITLE: {_job_value(job, 'title', '?')}\n"
+        f"COMPANY: {_job_value(job, 'site', '?')}\n"
+        f"LOCATION: {_job_value(job, 'location', 'N/A')}\n\n"
+        f"DESCRIPTION:\n{_job_value(job, 'full_description', '')[:6000]}"
     )
 
     messages = [
@@ -134,38 +176,61 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     t0 = time.time()
     completed = 0
     errors = 0
-    results: list[dict] = []
+    persisted = 0
 
     for job in jobs:
-        result = score_job(resume_text, job)
-        result["url"] = job["url"]
         completed += 1
+        title = _job_value(job, "title", "?")[:60]
+        url = _job_value(job, "url", "")
+
+        try:
+            result = _normalize_score_result(score_job(resume_text, job))
+        except Exception as e:
+            errors += 1
+            fallback = {
+                "score": 0,
+                "keywords": "",
+                "reasoning": f"Scoring error: {e}",
+                "url": url,
+            }
+            result = fallback
+            log.exception("[%d/%d] scoring failed  %s", completed, len(jobs), title)
+
+        result["url"] = url
 
         if result["score"] == 0:
             errors += 1
 
-        results.append(result)
+        if not url:
+            errors += 1
+            log.error("[%d/%d] score=%d  %s | missing job url; skipping DB update", completed, len(jobs), result["score"], title)
+            continue
+
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
+                (result["score"], f"{result['keywords']}\n{result['reasoning']}", now, result["url"]),
+            )
+            conn.commit()
+            persisted += 1
+        except Exception:
+            errors += 1
+            log.exception("Failed to persist score for %s", result.get("url", "?"))
+            continue
 
         log.info(
-            "[%d/%d] score=%d  %s",
+            "[%d/%d] score=%d  %s | %s",
             completed,
             len(jobs),
             result["score"],
-            job.get("title", "?")[:60],
+            title,
+            _log_reasoning_snippet(result.get("reasoning", "")),
         )
-
-    # Write scores to DB
-    now = datetime.now(timezone.utc).isoformat()
-    for r in results:
-        conn.execute(
-            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
-            (r["score"], f"{r['keywords']}\n{r['reasoning']}", now, r["url"]),
-        )
-    conn.commit()
 
     elapsed = time.time() - t0
     log.info(
-        "Done: %d scored in %.1fs (%.1f jobs/sec)", len(results), elapsed, len(results) / elapsed if elapsed > 0 else 0
+        "Done: %d scored in %.1fs (%.1f jobs/sec)", persisted, elapsed, persisted / elapsed if elapsed > 0 else 0
     )
 
     # Score distribution
@@ -177,7 +242,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     distribution = [(row[0], row[1]) for row in dist]
 
     return {
-        "scored": len(results),
+        "scored": persisted,
         "errors": errors,
         "elapsed": elapsed,
         "distribution": distribution,
