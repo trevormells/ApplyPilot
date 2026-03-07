@@ -96,11 +96,13 @@ def _build_profile_summary(profile: dict) -> str:
 def _build_location_check(profile: dict, search_config: dict) -> str:
     """Build the location eligibility check section of the prompt.
 
-    Uses the accept_patterns from search config to determine which cities
+    Uses the accept_patterns from location_rules in search config to determine which cities
     are acceptable for hybrid/onsite roles.
     """
     personal = profile["personal"]
-    location_cfg = search_config.get("location", {})
+    location_cfg = search_config.get("location_rules")
+    if location_cfg is None:
+        location_cfg = search_config.get("location", {})
     accept_patterns = location_cfg.get("accept_patterns", [])
     primary_city = personal.get("city", location_cfg.get("primary", "your city"))
 

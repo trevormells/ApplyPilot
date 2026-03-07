@@ -159,7 +159,9 @@ def _normalize_search_config(raw_cfg: dict | None) -> dict:
         queries.append(normalized)
     cfg["queries"] = queries
 
-    raw_locations = cfg.get("locations") or []
+    raw_locations = cfg.get("search_locations")
+    if raw_locations is None:
+        raw_locations = cfg.get("locations") or []
     locations: list[dict] = []
     for item in raw_locations:
         if isinstance(item, str):
@@ -183,13 +185,7 @@ def _normalize_search_config(raw_cfg: dict | None) -> dict:
         normalized["remote"] = bool(item.get("remote", False))
         locations.append(normalized)
 
-    if not locations:
-        default_location = defaults.get("location")
-        if default_location is not None:
-            location = str(default_location).strip()
-            if location:
-                remote = bool(defaults.get("distance") == 0 or "remote" in location.lower())
-                locations.append({"label": location, "location": location, "remote": remote})
+    cfg["search_locations"] = locations
     cfg["locations"] = locations
 
     sites = _clean_string_list(cfg.get("sites"))
@@ -204,7 +200,9 @@ def _normalize_search_config(raw_cfg: dict | None) -> dict:
         defaults["country_indeed"] = str(country).strip().lower()
     cfg["defaults"] = defaults
 
-    location_block = cfg.get("location") or {}
+    location_block = cfg.get("location_rules")
+    if location_block is None:
+        location_block = cfg.get("location") or {}
     if not cfg.get("location_accept"):
         cfg["location_accept"] = _clean_string_list(location_block.get("accept_patterns"))
     else:
@@ -213,6 +211,10 @@ def _normalize_search_config(raw_cfg: dict | None) -> dict:
         cfg["location_reject_non_remote"] = _clean_string_list(location_block.get("reject_patterns"))
     else:
         cfg["location_reject_non_remote"] = _clean_string_list(cfg.get("location_reject_non_remote"))
+    cfg["location_rules"] = {
+        "accept_patterns": cfg["location_accept"],
+        "reject_patterns": cfg["location_reject_non_remote"],
+    }
 
     location_labels = cfg.get("location_labels")
     if isinstance(location_labels, list):

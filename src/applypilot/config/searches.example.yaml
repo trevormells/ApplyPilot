@@ -29,14 +29,14 @@ queries:
   - query: "security engineer"
 
 # Locations to search
-locations:
+search_locations:
   - location: "San Francisco, CA"
     remote: false
   - location: "Remote"
     remote: true
 
 # Location filtering -- accept/reject patterns for job location text
-location:
+location_rules:
   accept_patterns:
     - "San Francisco"
     - "Bay Area"

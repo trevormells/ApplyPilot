@@ -1038,7 +1038,7 @@ def build_scrape_targets(
 
     queries_cfg = search_cfg.get("queries", [])
     queries = [q["query"] for q in queries_cfg]
-    locs = search_cfg.get("locations", [])
+    locs = search_cfg.get("search_locations") or search_cfg.get("locations", [])
     default_location = locs[0]["location"] if locs else ""
 
     targets: list[dict] = []
