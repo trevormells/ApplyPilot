@@ -40,7 +40,6 @@ def test_load_search_config_normalizes_legacy_keys_and_empty_sites(tmp_path, mon
     search_path.write_text(
         """
 defaults:
-  location: "Remote or Hybrid"
   distance: 50
   hours_old: 72
   results_per_site: 100
@@ -90,7 +89,6 @@ def test_load_search_config_does_not_build_location_from_defaults_when_missing(t
     search_path.write_text(
         """
 defaults:
-  location: "Remote"
   distance: 0
 queries:
   - "Backend Engineer"

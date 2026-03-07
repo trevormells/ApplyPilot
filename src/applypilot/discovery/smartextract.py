@@ -1023,8 +1023,8 @@ def build_scrape_targets(
 ) -> list[dict]:
     """Build the full list of (name, url) targets from sites + search config queries.
 
-    - "search" sites get expanded: 1 URL per query from search config
-    - "static" sites get scraped once as-is
+    - "search" sites get expanded: 1 URL per query x location when the URL uses location
+    - "static" sites get scraped once, or once per location if the URL uses location
 
     Placeholders in URLs:
       {query_encoded} -> URL-encoded search query
@@ -1039,7 +1039,7 @@ def build_scrape_targets(
     queries_cfg = search_cfg.get("queries", [])
     queries = [q["query"] for q in queries_cfg]
     locs = search_cfg.get("search_locations") or search_cfg.get("locations", [])
-    default_location = locs[0]["location"] if locs else ""
+    location_values = [loc["location"] for loc in locs if loc.get("location")] or [""]
 
     targets: list[dict] = []
 
@@ -1047,30 +1047,36 @@ def build_scrape_targets(
         site_url = site.get("url", "")
         site_name = site.get("name", "Unknown")
         site_type = site.get("type", "static")
+        uses_location = "{location_encoded}" in site_url
+        site_locations = location_values if uses_location else [""]
 
         if site_type == "search" and queries:
             for query in queries:
+                for location in site_locations:
+                    expanded_url = site_url
+                    expanded_url = expanded_url.replace("{query_encoded}", quote_plus(query))
+                    expanded_url = expanded_url.replace("{query}", quote_plus(query))
+                    expanded_url = expanded_url.replace("{location_encoded}", quote_plus(location))
+                    targets.append(
+                        {
+                            "name": site_name,
+                            "url": expanded_url,
+                            "query": query,
+                            "location": location or None,
+                        }
+                    )
+        else:
+            for location in site_locations:
                 expanded_url = site_url
-                expanded_url = expanded_url.replace("{query_encoded}", quote_plus(query))
-                expanded_url = expanded_url.replace("{query}", quote_plus(query))
-                expanded_url = expanded_url.replace("{location_encoded}", quote_plus(default_location))
+                expanded_url = expanded_url.replace("{location_encoded}", quote_plus(location))
                 targets.append(
                     {
                         "name": site_name,
                         "url": expanded_url,
-                        "query": query,
+                        "query": None,
+                        "location": location or None,
                     }
                 )
-        else:
-            expanded_url = site_url
-            expanded_url = expanded_url.replace("{location_encoded}", quote_plus(default_location))
-            targets.append(
-                {
-                    "name": site_name,
-                    "url": expanded_url,
-                    "query": None,
-                }
-            )
 
     return targets
 
@@ -1125,6 +1131,8 @@ def _run_all(
             label = target["name"]
             if target.get("query"):
                 label = f"{target['name']} [{target['query']}]"
+            if target.get("location"):
+                label = f"{label} @ {target['location']}"
             log.info("[%d/%d] %s", i + 1, len(targets), label)
 
             r = _run_one_site(target["name"], target["url"])
