@@ -21,13 +21,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from browser_use import Agent, Browser, ChatAnthropic, ChatBrowserUse, ChatGoogle, ChatOpenAI
-from packaging import version
+from browser_use import Agent, Browser, ChatAnthropic, ChatGoogle, ChatOpenAI
+from browser_use.agent.views import (
+	AgentHistoryList,
+	AgentStructuredOutput,
+)
+
 from rich.console import Console
 from rich.live import Live
 
 from applypilot import config
-from applypilot.apply import prompt as prompt_mod
+from applypilot.apply import promptv2 as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome,
     cleanup_worker,
@@ -44,9 +48,11 @@ from applypilot.apply.dashboard import (
     render_full,
     get_totals,
 )
+from applypilot.apply.captcha import build_captcha_tools
 from applypilot.apply import db as launcherv2_db
 
 logger = logging.getLogger(__name__)
+logging.getLogger("browser_use").setLevel(logging.WARNING)
 
 # Re-export launcher DB helpers so existing CLI imports keep working.
 acquire_job = launcherv2_db.acquire_job
@@ -118,92 +124,27 @@ class _JobCancelled(Exception):
     """Raised when a worker is interrupted and the current job should be skipped."""
 
 
-def _as_text(value) -> str:
-    """Convert values to compact text while preserving useful content."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (list, tuple)):
-        return "\n".join(_as_text(v) for v in value if _as_text(v))
-    return str(value)
+def _extract_agent_output(result_obj: AgentHistoryList[AgentStructuredOutput]) -> str:
+    """Extract final text and action count from browser-use AgentHistoryList."""
 
+    final_result = result_obj.final_result()
+    if final_result:
+        return final_result.strip()
 
-def _extract_agent_output(result_obj) -> tuple[str, int]:
-    """Extract final text and approximate action count from browser-use output."""
-    if result_obj is None:
-        return "", 0
+    extracted_content = [value.strip() for value in result_obj.extracted_content() if value and value.strip()]
+    errors = [value.strip() for value in result_obj.errors() if value and value.strip()]
 
-    action_count = 0
     text_parts: list[str] = []
+    if extracted_content:
+        text_parts.append("\n\n".join(extracted_content))
+    if errors:
+        text_parts.append("\n".join(f"ERROR: {error}" for error in errors))
 
-    for field in ("final_result", "result", "final_response", "extracted_content", "all_results", "errors"):
-        value = getattr(result_obj, field, None)
-        if callable(value):
-            with contextlib.suppress(Exception):
-                value = value()
-        rendered = _as_text(value).strip()
-        if rendered:
-            text_parts.append(rendered)
+    output = "\n\n".join(text_parts).strip()
+    if not output:
+        output = str(result_obj)
 
-    actions = getattr(result_obj, "model_actions", None)
-    if callable(actions):
-        with contextlib.suppress(Exception):
-            actions = actions()
-    if actions is None:
-        actions = getattr(result_obj, "actions", None)
-        if callable(actions):
-            with contextlib.suppress(Exception):
-                actions = actions()
-    if actions is not None:
-        with contextlib.suppress(Exception):
-            action_count = len(actions)
-
-    if not text_parts:
-        text_parts.append(_as_text(result_obj).strip())
-
-    output = "\n\n".join(p for p in text_parts if p).strip()
-    return output, action_count
-
-
-def _extract_usage_cost_usd(usage_obj) -> float:
-    """Extract total USD cost from browser-use usage objects."""
-    if usage_obj is None:
-        return 0.0
-
-    if isinstance(usage_obj, dict):
-        for key in ("total_cost", "total_cost_usd"):
-            value = usage_obj.get(key)
-            if isinstance(value, (int, float)):
-                return float(value)
-        return 0.0
-
-    for field in ("total_cost", "total_cost_usd"):
-        value = getattr(usage_obj, field, None)
-        if callable(value):
-            with contextlib.suppress(Exception):
-                value = value()
-        if isinstance(value, (int, float)):
-            return float(value)
-
-    return 0.0
-
-
-def _build_browser_use_task(prompt: str) -> str:
-    """Wrap the existing prompt with browser-use backend instructions."""
-    adapter = """
-== EXECUTION ADAPTER ==
-You are running in browser-use (not Playwright MCP).
-If instructions mention `browser_*` or `mcp__playwright__*`, execute the equivalent browser-use action.
-Keep all safety/business rules exactly as written.
-Your final response MUST include exactly one terminal status line in this format:
-- RESULT:APPLIED
-- RESULT:EXPIRED
-- RESULT:CAPTCHA
-- RESULT:LOGIN_ISSUE
-- RESULT:FAILED:reason
-"""
-    return f"{adapter.strip()}\n\n{prompt}"
+    return output
 
 
 async def _close_browser(browser) -> None:
@@ -221,24 +162,6 @@ async def _close_browser(browser) -> None:
             return
         except Exception:
             continue
-
-
-def _build_browser(
-    *,
-    worker_id: int,
-    port: int,
-    headless: bool,
-    chrome_instance_path: str | None = None,
-) -> Browser:
-    """Construct a browser session using browser-use's direct Browser kwargs API."""
-    cdp_url = f"http://127.0.0.1:{port}"
-    user_data_dir = f"/tmp/browser-use-worker-{worker_id}"
-    return Browser(
-        cdp_url=cdp_url,
-        headless=headless,
-        user_data_dir=user_data_dir,
-        executable_path=chrome_instance_path,
-    )
 
 
 def _build_llm(model: str) -> object:
@@ -262,17 +185,28 @@ async def _run_browser_use_agent(
     headless: bool,
     model: str,
     cancel_event: threading.Event,
-) -> tuple[str, int, float]:
-    """Execute a browser-use agent and return text output, actions, and cost."""
-    browser = _build_browser(
-        worker_id=worker_id,
-        port=port,
+) -> AgentHistoryList[AgentStructuredOutput]:
+    """Execute a browser-use agent and return the raw AgentHistoryList result."""
+    cdp_url = f"http://127.0.0.1:{port}"
+    user_data_dir = f"/tmp/browser-use-worker-{worker_id}"
+    browser = Browser(
+        cdp_url=cdp_url,
         headless=headless,
-        chrome_instance_path=config.get_chrome_path(),
+        user_data_dir=user_data_dir,
+        executable_path=config.get_chrome_path(),
     )
     try:
         llm = _build_llm(model=model)
-        agent = Agent(task=task, llm=llm, browser=browser, calculate_cost=True)
+        captcha_tools = build_captcha_tools()
+        agent = Agent(task=task, llm=llm, browser=browser, calculate_cost=True, tools=captcha_tools)
+
+        def _on_step(*args):
+            # browser_use callback signature: (browser_state, agent_output, step_number)
+            step_n = next((a for a in args if isinstance(a, int)), 0)
+            update_state(worker_id, actions=step_n, last_action=f"step {step_n}")
+
+        if hasattr(agent, "register_new_step_callback"):
+            agent.register_new_step_callback = _on_step
 
         run_task = asyncio.create_task(agent.run())
         while not run_task.done():
@@ -283,26 +217,7 @@ async def _run_browser_use_agent(
                 raise _JobCancelled
             await asyncio.sleep(0.25)
 
-        result_obj = await run_task
-        output, action_count = _extract_agent_output(result_obj)
-        # Native browser-use cost tracking:
-        # 1) history.usage from agent.run()
-        # 2) token_cost_service usage summary fallback
-        usage = getattr(result_obj, "usage", None)
-        if callable(usage):
-            with contextlib.suppress(Exception):
-                usage = usage()
-        cost_usd = _extract_usage_cost_usd(usage)
-        if cost_usd <= 0:
-            token_cost_service = getattr(agent, "token_cost_service", None)
-            get_usage_summary = getattr(token_cost_service, "get_usage_summary", None)
-            if callable(get_usage_summary):
-                with contextlib.suppress(Exception):
-                    get_usage_summary = get_usage_summary()
-            if inspect.isawaitable(get_usage_summary):
-                get_usage_summary = await get_usage_summary
-            cost_usd = _extract_usage_cost_usd(get_usage_summary)
-        return output, action_count, cost_usd
+        return await run_task
     finally:
         await _close_browser(browser)
 
@@ -333,7 +248,6 @@ def run_job(
         tailored_resume=resume_text,
         dry_run=dry_run,
     )
-    task = _build_browser_use_task(prompt)
 
     worker_dir = reset_worker_dir(worker_id)
 
@@ -366,9 +280,9 @@ def run_job(
         _active_runs[worker_id] = cancel_event
 
     try:
-        output, action_count, cost_usd = asyncio.run(
+        result_obj: AgentHistoryList[AgentStructuredOutput] = asyncio.run(
             _run_browser_use_agent(
-                task=task,
+                task=prompt,
                 worker_id=worker_id,
                 port=port,
                 headless=headless,
@@ -376,6 +290,9 @@ def run_job(
                 cancel_event=cancel_event,
             )
         )
+        output = _extract_agent_output(result_obj)
+        action_count = len(result_obj.model_actions())
+        cost_usd = result_obj.usage.total_cost
     except _JobCancelled:
         return "skipped", int((time.time() - start) * 1000)
     except Exception as e:
@@ -668,18 +585,16 @@ def main(
     signal.signal(signal.SIGINT, _sigint_handler)
 
     try:
-        with Live(render_full(), console=console, refresh_per_second=2) as live:
-            # Daemon thread for display refresh only (no business logic)
-            _dashboard_running = True
+        # Mute all StreamHandlers while the Live dashboard is active so that
+        # stray log lines don't corrupt the Rich terminal output.
+        _muted_handlers: list[tuple[logging.StreamHandler, int]] = []
+        for _h in logging.root.handlers:
+            if isinstance(_h, logging.StreamHandler):
+                _muted_handlers.append((_h, _h.level))
+                _h.setLevel(logging.CRITICAL + 1)
 
-            def _refresh():
-                while _dashboard_running:
-                    live.update(render_full())
-                    time.sleep(0.5)
-
-            refresh_thread = threading.Thread(target=_refresh, daemon=True)
-            refresh_thread.start()
-
+        # Let Rich own the refresh loop to avoid concurrent redraw races.
+        with Live(console=console, refresh_per_second=2, get_renderable=render_full) as live:
             if workers == 1:
                 # Single worker — run directly in main thread
                 total_applied, total_failed = worker_loop(
@@ -727,9 +642,12 @@ def main(
                 total_applied = sum(r[0] for r in results)
                 total_failed = sum(r[1] for r in results)
 
-            _dashboard_running = False
-            refresh_thread.join(timeout=2)
-            live.update(render_full())
+            # Force one last render with final totals before leaving Live mode.
+            live.refresh()
+
+        # Restore StreamHandler levels now that the Live dashboard is gone.
+        for _h, _lvl in _muted_handlers:
+            _h.setLevel(_lvl)
 
         totals = get_totals()
         console.print(f"\n[bold]Done: {total_applied} applied, {total_failed} failed (${totals['cost']:.3f})[/bold]")
