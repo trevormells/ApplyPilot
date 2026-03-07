@@ -18,9 +18,11 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
+from browser_use import Agent, Browser, ChatAnthropic, ChatBrowserUse, ChatGoogle, ChatOpenAI
+from packaging import version
 from rich.console import Console
 from rich.live import Live
 
@@ -31,7 +33,6 @@ from applypilot.apply.chrome import (
     cleanup_worker,
     kill_all_chrome,
     reset_worker_dir,
-    setup_worker_profile,
     cleanup_on_exit,
     BASE_CDP_PORT,
 )
@@ -43,17 +44,16 @@ from applypilot.apply.dashboard import (
     render_full,
     get_totals,
 )
-from applypilot.database import get_connection
+from applypilot.apply import db as launcherv2_db
 
 logger = logging.getLogger(__name__)
 
-
-# Blocked sites loaded from config/sites.yaml
-def _load_blocked():
-    from applypilot.config import load_blocked_sites
-
-    return load_blocked_sites()
-
+# Re-export launcher DB helpers so existing CLI imports keep working.
+acquire_job = launcherv2_db.acquire_job
+mark_result = launcherv2_db.mark_result
+release_lock = launcherv2_db.release_lock
+mark_job = launcherv2_db.mark_job
+reset_failed = launcherv2_db.reset_failed
 
 # How often to poll the DB when the queue is empty (seconds)
 POLL_INTERVAL = config.DEFAULTS["poll_interval"]
@@ -69,150 +69,6 @@ _active_lock = threading.Lock()
 atexit.register(cleanup_on_exit)
 if platform.system() != "Windows":
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-
-
-# ---------------------------------------------------------------------------
-# Database operations
-# ---------------------------------------------------------------------------
-
-
-def acquire_job(target_url: str | None = None, min_score: int = 7, worker_id: int = 0) -> dict | None:
-    """Atomically acquire the next job to apply to.
-
-    Args:
-        target_url: Apply to a specific URL instead of picking from queue.
-        min_score: Minimum fit_score threshold.
-        worker_id: Worker claiming this job (for tracking).
-
-    Returns:
-        Job dict or None if the queue is empty.
-    """
-    conn = get_connection()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-
-        if target_url:
-            like = f"%{target_url.split('?')[0].rstrip('/')}%"
-            row = conn.execute(
-                """
-                SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
-                FROM jobs
-                WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
-                  AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
-                LIMIT 1
-            """,
-                (target_url, target_url, like, like),
-            ).fetchone()
-        else:
-            blocked_sites, blocked_patterns = _load_blocked()
-            # Build parameterized filters to avoid SQL injection
-            params: list = [min_score]
-            site_clause = ""
-            if blocked_sites:
-                placeholders = ",".join("?" * len(blocked_sites))
-                site_clause = f"AND site NOT IN ({placeholders})"
-                params.extend(blocked_sites)
-            url_clauses = ""
-            if blocked_patterns:
-                url_clauses = " ".join("AND url NOT LIKE ?" for _ in blocked_patterns)
-                params.extend(blocked_patterns)
-            row = conn.execute(
-                f"""
-                SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
-                FROM jobs
-                WHERE tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status = 'failed')
-                  AND (apply_attempts IS NULL OR apply_attempts < ?)
-                  AND fit_score >= ?
-                  {site_clause}
-                  {url_clauses}
-                ORDER BY fit_score DESC, url
-                LIMIT 1
-            """,
-                [config.DEFAULTS["max_apply_attempts"]] + params,
-            ).fetchone()
-
-        if not row:
-            conn.rollback()
-            return None
-
-        # Skip manual ATS sites (unsolvable CAPTCHAs)
-        from applypilot.config import is_manual_ats
-
-        apply_url = row["application_url"] or row["url"]
-        if is_manual_ats(apply_url):
-            conn.execute(
-                "UPDATE jobs SET apply_status = 'manual', apply_error = 'manual ATS' WHERE url = ?",
-                (row["url"],),
-            )
-            conn.commit()
-            logger.info("Skipping manual ATS: %s", row["url"][:80])
-            return None
-
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            """
-            UPDATE jobs SET apply_status = 'in_progress',
-                           agent_id = ?,
-                           last_attempted_at = ?
-            WHERE url = ?
-        """,
-            (f"worker-{worker_id}", now, row["url"]),
-        )
-        conn.commit()
-
-        return dict(row)
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def mark_result(
-    url: str,
-    status: str,
-    error: str | None = None,
-    permanent: bool = False,
-    duration_ms: int | None = None,
-    task_id: str | None = None,
-) -> None:
-    """Update a job's apply status in the database."""
-    conn = get_connection()
-    now = datetime.now(timezone.utc).isoformat()
-    if status == "applied":
-        conn.execute(
-            """
-            UPDATE jobs SET apply_status = 'applied', applied_at = ?,
-                           apply_error = NULL, agent_id = NULL,
-                           apply_duration_ms = ?, apply_task_id = ?
-            WHERE url = ?
-        """,
-            (now, duration_ms, task_id, url),
-        )
-    else:
-        attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
-        conn.execute(
-            f"""
-            UPDATE jobs SET apply_status = ?, apply_error = ?,
-                           apply_attempts = {attempts}, agent_id = NULL,
-                           apply_duration_ms = ?, apply_task_id = ?
-            WHERE url = ?
-        """,
-            (status, error or "unknown", duration_ms, task_id, url),
-        )
-    conn.commit()
-
-
-def release_lock(url: str) -> None:
-    """Release the in_progress lock without changing status."""
-    conn = get_connection()
-    conn.execute(
-        "UPDATE jobs SET apply_status = NULL, agent_id = NULL WHERE url = ? AND apply_status = 'in_progress'",
-        (url,),
-    )
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -253,55 +109,6 @@ def gen_prompt(
     return prompt_file
 
 
-def mark_job(url: str, status: str, reason: str | None = None) -> None:
-    """Manually mark a job's apply status in the database.
-
-    Args:
-        url: Job URL to mark.
-        status: Either 'applied' or 'failed'.
-        reason: Failure reason (only for status='failed').
-    """
-    conn = get_connection()
-    now = datetime.now(timezone.utc).isoformat()
-    if status == "applied":
-        conn.execute(
-            """
-            UPDATE jobs SET apply_status = 'applied', applied_at = ?,
-                           apply_error = NULL, agent_id = NULL
-            WHERE url = ?
-        """,
-            (now, url),
-        )
-    else:
-        conn.execute(
-            """
-            UPDATE jobs SET apply_status = 'failed', apply_error = ?,
-                           apply_attempts = 99, agent_id = NULL
-            WHERE url = ?
-        """,
-            (reason or "manual", url),
-        )
-    conn.commit()
-
-
-def reset_failed() -> int:
-    """Reset all failed jobs so they can be retried.
-
-    Returns:
-        Number of jobs reset.
-    """
-    conn = get_connection()
-    cursor = conn.execute("""
-        UPDATE jobs SET apply_status = NULL, apply_error = NULL,
-                       apply_attempts = 0, agent_id = NULL
-        WHERE apply_status = 'failed'
-          OR (apply_status IS NOT NULL AND apply_status != 'applied'
-              AND apply_status != 'in_progress')
-    """)
-    conn.commit()
-    return cursor.rowcount
-
-
 # ---------------------------------------------------------------------------
 # Per-job execution
 # ---------------------------------------------------------------------------
@@ -309,38 +116,6 @@ def reset_failed() -> int:
 
 class _JobCancelled(Exception):
     """Raised when a worker is interrupted and the current job should be skipped."""
-
-
-def _filter_kwargs(callable_obj, kwargs: dict) -> dict:
-    """Return only kwargs supported by callable_obj signature."""
-    try:
-        sig = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return kwargs
-
-    params = sig.parameters
-    accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-    if accepts_var_kw:
-        return kwargs
-    return {k: v for k, v in kwargs.items() if k in params}
-
-
-def _supports_kwarg(callable_obj, name: str) -> bool:
-    """Check whether a callable explicitly declares a kwarg name."""
-    try:
-        return name in inspect.signature(callable_obj).parameters
-    except (TypeError, ValueError):
-        return False
-
-
-def _maybe_call(attr) -> object | None:
-    """Invoke zero-arg callables or return the value as-is."""
-    if callable(attr):
-        try:
-            return attr()
-        except Exception:
-            return None
-    return attr
 
 
 def _as_text(value) -> str:
@@ -363,14 +138,23 @@ def _extract_agent_output(result_obj) -> tuple[str, int]:
     text_parts: list[str] = []
 
     for field in ("final_result", "result", "final_response", "extracted_content", "all_results", "errors"):
-        value = _maybe_call(getattr(result_obj, field, None))
+        value = getattr(result_obj, field, None)
+        if callable(value):
+            with contextlib.suppress(Exception):
+                value = value()
         rendered = _as_text(value).strip()
         if rendered:
             text_parts.append(rendered)
 
-    actions = _maybe_call(getattr(result_obj, "model_actions", None))
+    actions = getattr(result_obj, "model_actions", None)
+    if callable(actions):
+        with contextlib.suppress(Exception):
+            actions = actions()
     if actions is None:
-        actions = _maybe_call(getattr(result_obj, "actions", None))
+        actions = getattr(result_obj, "actions", None)
+        if callable(actions):
+            with contextlib.suppress(Exception):
+                actions = actions()
     if actions is not None:
         with contextlib.suppress(Exception):
             action_count = len(actions)
@@ -382,22 +166,25 @@ def _extract_agent_output(result_obj) -> tuple[str, int]:
     return output, action_count
 
 
-def _extract_cost_usd(result_obj) -> float:
-    """Extract best-effort cost from result object."""
-    if result_obj is None:
+def _extract_usage_cost_usd(usage_obj) -> float:
+    """Extract total USD cost from browser-use usage objects."""
+    if usage_obj is None:
         return 0.0
 
-    for field in ("total_cost_usd", "cost_usd", "total_cost"):
-        value = _maybe_call(getattr(result_obj, field, None))
-        if isinstance(value, (int, float)):
-            return float(value)
-
-    usage = _maybe_call(getattr(result_obj, "usage", None))
-    if isinstance(usage, dict):
-        for key in ("total_cost_usd", "cost_usd", "total_cost"):
-            value = usage.get(key)
+    if isinstance(usage_obj, dict):
+        for key in ("total_cost", "total_cost_usd"):
+            value = usage_obj.get(key)
             if isinstance(value, (int, float)):
                 return float(value)
+        return 0.0
+
+    for field in ("total_cost", "total_cost_usd"):
+        value = getattr(usage_obj, field, None)
+        if callable(value):
+            with contextlib.suppress(Exception):
+                value = value()
+        if isinstance(value, (int, float)):
+            return float(value)
 
     return 0.0
 
@@ -436,64 +223,37 @@ async def _close_browser(browser) -> None:
             continue
 
 
-def _build_browser(Browser, BrowserConfig, worker_id: int, port: int, headless: bool):
-    """Construct a browser instance while tolerating browser-use API drift."""
-    profile_dir = setup_worker_profile(worker_id)
-
-    base_kwargs: dict[str, object] = {}
-    base_kwargs["headless"] = headless
-    base_kwargs["cdp_url"] = f"http://127.0.0.1:{port}"
-    base_kwargs["user_data_dir"] = str(profile_dir)
-    with contextlib.suppress(Exception):
-        base_kwargs["chrome_instance_path"] = config.get_chrome_path()
-
-    if BrowserConfig is not None and _supports_kwarg(Browser, "config"):
-        config_kwargs = _filter_kwargs(BrowserConfig, base_kwargs)
-        return Browser(config=BrowserConfig(**config_kwargs))
-
-    filtered = _filter_kwargs(Browser, base_kwargs)
-    with contextlib.suppress(TypeError):
-        return Browser(**filtered)
-    return Browser()
+def _build_browser(
+    *,
+    worker_id: int,
+    port: int,
+    headless: bool,
+    chrome_instance_path: str | None = None,
+) -> Browser:
+    """Construct a browser session using browser-use's direct Browser kwargs API."""
+    cdp_url = f"http://127.0.0.1:{port}"
+    user_data_dir = f"/tmp/browser-use-worker-{worker_id}"
+    return Browser(
+        cdp_url=cdp_url,
+        headless=headless,
+        user_data_dir=user_data_dir,
+        executable_path=chrome_instance_path,
+    )
 
 
-def _build_llm(
-    model: str,
-    ChatBrowserUse,
-    ChatGoogle=None,
-    ChatAnthropic=None,
-    ChatOpenAI=None,
-):
-    """Construct the correct browser-use LLM class for the requested model."""
-    model = (model or "").strip()
-    model_lower = model.lower()
+def _build_llm(model: str) -> object:
+    """Construct a deterministic browser-use LLM class from model name."""
+    normalized_model = model.strip().lower()
+    if "gemini" in normalized_model or "gemma" in normalized_model:
+        return ChatGoogle(model=model)
 
-    browser_use_models = {"bu-latest", "bu-1-0", "bu-2-0"}
-    if not model or model_lower in browser_use_models or model_lower.startswith("browser-use/"):
-        llm_kwargs = _filter_kwargs(ChatBrowserUse, {"model": model or "bu-latest"})
-        with contextlib.suppress(TypeError):
-            return ChatBrowserUse(**llm_kwargs)
-        return ChatBrowserUse()
+    if "claude" in normalized_model or normalized_model.startswith("anthropic/"):
+        return ChatAnthropic(model=model)
 
-    if ("gemini" in model_lower or "gemma" in model_lower) and ChatGoogle is not None:
-        llm_kwargs = _filter_kwargs(ChatGoogle, {"model": model})
-        return ChatGoogle(**llm_kwargs)
+    if "gpt" in normalized_model or normalized_model.startswith(("o1", "o3", "o4", "codex", "chatgpt")):
+        return ChatOpenAI(model=model)
 
-    if ("claude" in model_lower or "anthropic/" in model_lower) and ChatAnthropic is not None:
-        llm_kwargs = _filter_kwargs(ChatAnthropic, {"model": model})
-        return ChatAnthropic(**llm_kwargs)
-
-    if (
-        ("gpt" in model_lower or model_lower.startswith(("o1", "o3", "o4", "codex", "chatgpt")))
-        and ChatOpenAI is not None
-    ):
-        llm_kwargs = _filter_kwargs(ChatOpenAI, {"model": model})
-        return ChatOpenAI(**llm_kwargs)
-
-    # Final fallback to browser-use hosted model class with explicit failure surface.
-    llm_kwargs = _filter_kwargs(ChatBrowserUse, {"model": model})
-    return ChatBrowserUse(**llm_kwargs)
-
+    raise ValueError(f"Unsupported model: {model}")
 
 async def _run_browser_use_agent(
     task: str,
@@ -504,38 +264,17 @@ async def _run_browser_use_agent(
     cancel_event: threading.Event,
 ) -> tuple[str, int, float]:
     """Execute a browser-use agent and return text output, actions, and cost."""
+    browser = _build_browser(
+        worker_id=worker_id,
+        port=port,
+        headless=headless,
+        chrome_instance_path=config.get_chrome_path(),
+    )
     try:
-        from browser_use import Agent, Browser, ChatBrowserUse
-    except Exception as exc:
-        raise RuntimeError(
-            "browser-use is not installed. Install dependencies and retry (pip install -e . or pip install browser-use)."
-        ) from exc
+        llm = _build_llm(model=model)
+        agent = Agent(task=task, llm=llm, browser=browser, calculate_cost=True)
 
-    with contextlib.suppress(Exception):
-        from browser_use import BrowserConfig  # type: ignore
-    with contextlib.suppress(Exception):
-        from browser_use import ChatGoogle  # type: ignore
-    with contextlib.suppress(Exception):
-        from browser_use import ChatAnthropic  # type: ignore
-    with contextlib.suppress(Exception):
-        from browser_use import ChatOpenAI  # type: ignore
-    BrowserConfig = locals().get("BrowserConfig")
-    ChatGoogle = locals().get("ChatGoogle")
-    ChatAnthropic = locals().get("ChatAnthropic")
-    ChatOpenAI = locals().get("ChatOpenAI")
-
-    browser = _build_browser(Browser, BrowserConfig, worker_id=worker_id, port=port, headless=headless)
-    try:
-        llm = _build_llm(
-            model=model,
-            ChatBrowserUse=ChatBrowserUse,
-            ChatGoogle=ChatGoogle,
-            ChatAnthropic=ChatAnthropic,
-            ChatOpenAI=ChatOpenAI,
-        )
-        agent = Agent(**_filter_kwargs(Agent, {"task": task, "llm": llm, "browser": browser}))
-
-        run_task = asyncio.create_task(agent.run(**_filter_kwargs(agent.run, {})))
+        run_task = asyncio.create_task(agent.run())
         while not run_task.done():
             if cancel_event.is_set():
                 run_task.cancel()
@@ -546,7 +285,23 @@ async def _run_browser_use_agent(
 
         result_obj = await run_task
         output, action_count = _extract_agent_output(result_obj)
-        cost_usd = _extract_cost_usd(result_obj)
+        # Native browser-use cost tracking:
+        # 1) history.usage from agent.run()
+        # 2) token_cost_service usage summary fallback
+        usage = getattr(result_obj, "usage", None)
+        if callable(usage):
+            with contextlib.suppress(Exception):
+                usage = usage()
+        cost_usd = _extract_usage_cost_usd(usage)
+        if cost_usd <= 0:
+            token_cost_service = getattr(agent, "token_cost_service", None)
+            get_usage_summary = getattr(token_cost_service, "get_usage_summary", None)
+            if callable(get_usage_summary):
+                with contextlib.suppress(Exception):
+                    get_usage_summary = get_usage_summary()
+            if inspect.isawaitable(get_usage_summary):
+                get_usage_summary = await get_usage_summary
+            cost_usd = _extract_usage_cost_usd(get_usage_summary)
         return output, action_count, cost_usd
     finally:
         await _close_browser(browser)
