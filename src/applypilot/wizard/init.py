@@ -125,6 +125,7 @@ def _setup_llm() -> bool:
     env_lines = ["# ApplyPilot configuration", ""]
     api_key = ""
     model = ""
+    high_model = ""
     endpoint = ""
 
     while True:
@@ -164,6 +165,13 @@ def _setup_llm() -> bool:
                 return False
             env_lines = ["# ApplyPilot configuration", ""]  # Reset
 
+    high_model = Prompt.ask(
+        "High-quality writing model (optional, leave blank to reuse LLM_MODEL)",
+        default="",
+    ).strip()
+    if high_model:
+        env_lines.append(f"LLM_MODEL_HIGH={high_model}")
+
     env_lines.append("")
     ENV_PATH.write_text("\n".join(env_lines), encoding="utf-8")
     console.print(f"[green]LLM configuration saved to {ENV_PATH}[/green]")
@@ -178,6 +186,8 @@ def _setup_llm() -> bool:
         if api_key:
             os.environ["LLM_API_KEY"] = api_key
     os.environ["LLM_MODEL"] = model
+    if high_model:
+        os.environ["LLM_MODEL_HIGH"] = high_model
 
     return True
 

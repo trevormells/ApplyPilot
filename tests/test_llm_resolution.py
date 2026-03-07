@@ -36,6 +36,44 @@ def test_provider_and_api_key_come_from_model_contract() -> None:
     assert cfg.api_key == "g-key"
 
 
+def test_high_tier_falls_back_to_default_model() -> None:
+    cfg = resolve_llm_config(
+        {"LLM_MODEL": "openai/gpt-5-mini", "OPENAI_API_KEY": "o-key"},
+        model_tier="high",
+    )
+    assert cfg.provider == "openai"
+    assert cfg.model == "openai/gpt-5-mini"
+    assert cfg.api_key == "o-key"
+
+
+def test_high_tier_prefers_explicit_high_model() -> None:
+    cfg = resolve_llm_config(
+        {
+            "LLM_MODEL": "openai/gpt-5-mini",
+            "LLM_MODEL_HIGH": "openai/gpt-5",
+            "OPENAI_API_KEY": "o-key",
+        },
+        model_tier="high",
+    )
+    assert cfg.provider == "openai"
+    assert cfg.model == "openai/gpt-5"
+    assert cfg.api_key == "o-key"
+
+
+def test_high_tier_can_infer_provider_from_default_model_contract() -> None:
+    cfg = resolve_llm_config(
+        {
+            "LLM_MODEL": "openai/gpt-5-mini",
+            "LLM_MODEL_HIGH": "gpt-5",
+            "LLM_API_KEY": "generic",
+        },
+        model_tier="high",
+    )
+    assert cfg.provider == "openai"
+    assert cfg.model == "openai/gpt-5"
+    assert cfg.api_key == "generic"
+
+
 def test_uses_generic_api_key_for_unmapped_provider() -> None:
     cfg = resolve_llm_config({"LLM_MODEL": "vertex_ai/gemini-3.0-flash", "LLM_API_KEY": "v-key"})
     assert cfg.provider == "vertex_ai"

@@ -88,7 +88,7 @@ Each stage is independent. Run them all or pick what you need.
 |-----------|-------------|---------|
 | Python 3.11+ | Everything | Core runtime |
 | browser-use | Auto-apply | Python agent runtime that drives the browser session |
-| LLM credentials or local endpoint | Scoring, tailoring, cover letters | Set one of `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `LLM_URL`. Optional: set `LLM_MODEL` (for example `gemini/gemini-3.0-flash`) to override the default model. |
+| LLM credentials or local endpoint | Scoring, tailoring, cover letters | Set one of `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `LLM_URL`. Optional: set `LLM_MODEL` (for example `gemini/gemini-3.0-flash`) to override the default model, and `LLM_MODEL_HIGH` for higher-quality writing tasks like resume and cover-letter generation. |
 | Chrome/Chromium | Auto-apply | Auto-detected on most systems |
 **Gemini API key is free.** Get one at [aistudio.google.com](https://aistudio.google.com). OpenAI, Claude, and local models (Ollama/llama.cpp/vLLM) are also supported.
 ApplyPilot uses Gemini through LiteLLM's native Gemini provider path, and Gemini API version routing is owned by LiteLLM.
@@ -120,7 +120,7 @@ Your personal data in one structured file: contact info, work authorization, com
 Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
 
 ### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `LLM_URL`, optional `LLM_MODEL`, optional `LLM_API_KEY`, and `CAPSOLVER_API_KEY`.
+API keys and runtime config: `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `LLM_URL`, optional `LLM_MODEL`, optional `LLM_MODEL_HIGH`, optional `LLM_API_KEY`, and `CAPSOLVER_API_KEY`.
 
 ### Package configs (shipped with ApplyPilot)
 - `config/employers.yaml` - Workday employer registry (48 preconfigured)

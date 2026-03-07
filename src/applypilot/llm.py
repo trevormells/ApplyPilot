@@ -4,8 +4,11 @@ Runtime contract:
   - If set, LLM_MODEL must be a fully-qualified LiteLLM model string
     (for example: openai/gpt-4o-mini, anthropic/claude-3-5-haiku-latest,
     gemini/gemini-3.0-flash).
-  - If LLM_MODEL is unset, provider is inferred by first configured source:
-    GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, then LLM_URL.
+  - If set, LLM_MODEL_HIGH follows the same model contract and is intended for
+    quality-sensitive writing tasks. If unset, it falls back to LLM_MODEL.
+  - If the active model env var is unset, provider is inferred by first
+    configured source: GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+    then LLM_URL.
   - Credentials come from provider env vars or generic LLM_API_KEY.
   - LLM_URL is optional for custom OpenAI-compatible endpoints.
 """
@@ -69,6 +72,9 @@ class LiteLLMExtra(TypedDict, total=False):
     fallbacks: list[str]
 
 
+ModelTier = Literal["default", "high"]
+
+
 def _env_get(env: Mapping[str, str], key: str) -> str:
     value = env.get(key, "")
     if value is None:
@@ -85,6 +91,17 @@ def _provider_from_model(model: str) -> str:
     return provider
 
 
+def _model_env_var(model_tier: ModelTier) -> str:
+    return "LLM_MODEL_HIGH" if model_tier == "high" else "LLM_MODEL"
+
+
+def _configured_model(env: Mapping[str, str], model_tier: ModelTier) -> str:
+    model = _env_get(env, _model_env_var(model_tier))
+    if model or model_tier == "default":
+        return model
+    return _env_get(env, "LLM_MODEL")
+
+
 def _infer_provider_and_source(env: Mapping[str, str]) -> tuple[str, str] | None:
     for provider, env_key in _INFERRED_SOURCE_ORDER:
         if _env_get(env, env_key):
@@ -92,13 +109,29 @@ def _infer_provider_and_source(env: Mapping[str, str]) -> tuple[str, str] | None
     return None
 
 
-def resolve_llm_config(env: Mapping[str, str] | None = None) -> LLMConfig:
+def _infer_provider_for_tier(
+    env: Mapping[str, str], model_tier: ModelTier
+) -> tuple[str, str] | None:
+    inferred = _infer_provider_and_source(env)
+    if inferred is not None:
+        return inferred
+    if model_tier == "high":
+        base_model = _env_get(env, "LLM_MODEL")
+        if "/" in base_model:
+            return _provider_from_model(base_model), "LLM_MODEL"
+    return None
+
+
+def resolve_llm_config(
+    env: Mapping[str, str] | None = None, *, model_tier: ModelTier = "default"
+) -> LLMConfig:
     """Resolve LLM configuration from environment."""
     env_map = env if env is not None else os.environ
 
-    model = _env_get(env_map, "LLM_MODEL")
+    model_env_var = _model_env_var(model_tier)
+    model = _configured_model(env_map, model_tier)
     local_url = _env_get(env_map, "LLM_URL")
-    inferred = _infer_provider_and_source(env_map)
+    inferred = _infer_provider_for_tier(env_map, model_tier)
     if model:
         if "/" in model:
             provider = _provider_from_model(model)
@@ -107,7 +140,8 @@ def resolve_llm_config(env: Mapping[str, str] | None = None) -> LLMConfig:
             model = f"{provider}/{model}"
         else:
             raise RuntimeError(
-                "LLM_MODEL must include a provider prefix (for example 'openai/gpt-4o-mini')."
+                f"{model_env_var} must include a provider prefix "
+                "(for example 'openai/gpt-4o-mini')."
             )
     else:
         if not inferred:
@@ -136,7 +170,7 @@ def resolve_llm_config(env: Mapping[str, str] | None = None) -> LLMConfig:
             else "LLM_API_KEY"
         )
         raise RuntimeError(
-            f"Missing credentials for LLM_MODEL '{model}'. Set {key_help}, or set LLM_URL for "
+            f"Missing credentials for model '{model}'. Set {key_help}, or set LLM_URL for "
             "a local OpenAI-compatible endpoint."
         )
 
@@ -213,23 +247,31 @@ class LLMClient:
         return None
 
 
-_instance: LLMClient | None = None
+_instances: dict[tuple[str, str | None, str, str], LLMClient] = {}
 
 
-def get_client() -> LLMClient:
-    """Return (or create) the module-level LLMClient singleton."""
-    global _instance
-    if _instance is None:
-        try:
-            from applypilot.config import load_env
+def get_client(*, model_tier: ModelTier = "default") -> LLMClient:
+    """Return (or create) a cached LLMClient for the requested model tier."""
+    try:
+        from applypilot.config import load_env
 
-            load_env()
-        except ModuleNotFoundError:
-            log.debug("python-dotenv not installed; skipping .env auto-load in llm.get_client().")
-        config = resolve_llm_config()
-        log.info("LLM provider: %s  model: %s", config.provider, config.model)
-        _instance = LLMClient(config)
-    return _instance
+        load_env()
+    except ModuleNotFoundError:
+        log.debug("python-dotenv not installed; skipping .env auto-load in llm.get_client().")
+
+    config = resolve_llm_config(model_tier=model_tier)
+    cache_key = (config.provider, config.api_base, config.model, config.api_key)
+    client = _instances.get(cache_key)
+    if client is None:
+        log.info(
+            "LLM provider (%s): %s  model: %s",
+            model_tier,
+            config.provider,
+            config.model,
+        )
+        client = LLMClient(config)
+        _instances[cache_key] = client
+    return client
 
 
 def validate_api_key(provider: str, api_key: str, model: str = "", endpoint: str = "") -> tuple[bool, str]:
