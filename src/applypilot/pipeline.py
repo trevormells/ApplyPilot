@@ -23,9 +23,10 @@ from rich.table import Table
 
 from applypilot.config import load_env, ensure_dirs
 from applypilot.database import init_db, get_connection, get_stats
+from applypilot.stage_logging import StageConsole, capture_stage_output
 
 log = logging.getLogger(__name__)
-console = Console()
+console = StageConsole(Console())
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ def _run_discover(workers: int = 1) -> dict:
     stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
 
     # JobSpy
-    console.print("  [cyan]JobSpy full crawl...[/cyan]")
+    console.log_only("  [cyan]JobSpy full crawl...[/cyan]")
     try:
         from applypilot.discovery.jobspy import run_discovery
 
@@ -73,11 +74,11 @@ def _run_discover(workers: int = 1) -> dict:
         stats["jobspy"] = "ok"
     except Exception as e:
         log.error("JobSpy crawl failed: %s", e)
-        console.print(f"  [red]JobSpy error:[/red] {e}")
+        console.log_only(f"  [red]JobSpy error:[/red] {e}")
         stats["jobspy"] = f"error: {e}"
 
     # Workday corporate scraper
-    console.print("  [cyan]Workday corporate scraper...[/cyan]")
+    console.log_only("  [cyan]Workday corporate scraper...[/cyan]")
     try:
         from applypilot.discovery.workday import run_workday_discovery
 
@@ -85,11 +86,11 @@ def _run_discover(workers: int = 1) -> dict:
         stats["workday"] = "ok"
     except Exception as e:
         log.error("Workday scraper failed: %s", e)
-        console.print(f"  [red]Workday error:[/red] {e}")
+        console.log_only(f"  [red]Workday error:[/red] {e}")
         stats["workday"] = f"error: {e}"
 
     # Smart extract
-    console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
+    console.log_only("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
     try:
         from applypilot.discovery.smartextract import run_smart_extract
 
@@ -97,7 +98,7 @@ def _run_discover(workers: int = 1) -> dict:
         stats["smartextract"] = "ok"
     except Exception as e:
         log.error("Smart extract failed: %s", e)
-        console.print(f"  [red]Smart extract error:[/red] {e}")
+        console.log_only(f"  [red]Smart extract error:[/red] {e}")
         stats["smartextract"] = f"error: {e}"
 
     return stats
@@ -282,44 +283,50 @@ def _run_stage_streaming(
 
     upstream = _UPSTREAM[stage]
 
-    if stage == "discover":
-        # Discover runs once (its sub-scrapers already do their full crawl)
-        try:
-            result = runner(**kwargs)
-            tracker.mark_done(stage, result)
-        except Exception as e:
-            log.exception("Stage '%s' crashed", stage)
-            tracker.mark_done(stage, {"status": f"error: {e}"})
-        return
+    with capture_stage_output(stage, console):
+        console.print(f"\n{'=' * 70}")
+        console.print(f"  [bold]STAGE: {stage}[/bold] — {STAGE_META[stage]['desc']} (streaming)")
+        console.print(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
+        console.print(f"{'=' * 70}")
 
-    # For downstream stages: loop until upstream done + no pending work
-    passes = 0
-    while not stop_event.is_set():
-        # Wait for upstream to start producing work (first pass only)
-        if passes == 0 and upstream and not tracker.is_done(upstream):
-            # Wait a bit for upstream to produce some work before first run
-            tracker.wait(upstream, timeout=_STREAM_POLL_INTERVAL)
-
-        pending = _count_pending(stage, min_score)
-
-        if pending > 0:
+        if stage == "discover":
+            # Discover runs once (its sub-scrapers already do their full crawl)
             try:
-                runner(**kwargs)
-                passes += 1
+                result = runner(**kwargs)
+                tracker.mark_done(stage, result)
             except Exception as e:
-                log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
-                passes += 1
-        else:
-            # No work right now
-            upstream_done = upstream is None or tracker.is_done(upstream)
-            if upstream_done:
-                # No work and upstream is done — this stage is finished
-                break
-            # Upstream still running, wait and retry
-            if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
-                break  # Stop requested
+                log.exception("Stage '%s' crashed", stage)
+                tracker.mark_done(stage, {"status": f"error: {e}"})
+                console.print(f"\n  [red]STAGE FAILED:[/red] {e}")
+            else:
+                console.print(f"\n  Stage '{stage}' completed — ok")
+            return
 
-    tracker.mark_done(stage, {"status": "ok", "passes": passes})
+        # For downstream stages: loop until upstream done + no pending work
+        passes = 0
+        while not stop_event.is_set():
+            # Wait a bit for upstream to produce some work before first run
+            if passes == 0 and upstream and not tracker.is_done(upstream):
+                tracker.wait(upstream, timeout=_STREAM_POLL_INTERVAL)
+
+            pending = _count_pending(stage, min_score)
+
+            if pending > 0:
+                try:
+                    runner(**kwargs)
+                    passes += 1
+                except Exception as e:
+                    log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
+                    passes += 1
+            else:
+                upstream_done = upstream is None or tracker.is_done(upstream)
+                if upstream_done:
+                    break
+                if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
+                    break
+
+        tracker.mark_done(stage, {"status": "ok", "passes": passes})
+        console.print(f"\n  Stage '{stage}' completed after {passes} pass(es)")
 
 
 # ---------------------------------------------------------------------------
@@ -334,46 +341,47 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1, valida
     pipeline_start = time.time()
 
     for name in ordered:
-        meta = STAGE_META[name]
-        console.print(f"\n{'=' * 70}")
-        console.print(f"  [bold]STAGE: {name}[/bold] — {meta['desc']}")
-        console.print(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
-        console.print(f"{'=' * 70}")
+        with capture_stage_output(name, console):
+            meta = STAGE_META[name]
+            console.print(f"\n{'=' * 70}")
+            console.print(f"  [bold]STAGE: {name}[/bold] — {meta['desc']}")
+            console.print(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
+            console.print(f"{'=' * 70}")
 
-        t0 = time.time()
-        runner = _STAGE_RUNNERS[name]
+            t0 = time.time()
+            runner = _STAGE_RUNNERS[name]
 
-        try:
-            kwargs: dict = {}
-            if name in ("tailor", "cover"):
-                kwargs["min_score"] = min_score
-                kwargs["validation_mode"] = validation_mode
-            if name in ("discover", "enrich"):
-                kwargs["workers"] = workers
-            result = runner(**kwargs)
-            elapsed = time.time() - t0
+            try:
+                kwargs: dict = {}
+                if name in ("tailor", "cover"):
+                    kwargs["min_score"] = min_score
+                    kwargs["validation_mode"] = validation_mode
+                if name in ("discover", "enrich"):
+                    kwargs["workers"] = workers
+                result = runner(**kwargs)
+                elapsed = time.time() - t0
 
-            status = "ok"
-            if isinstance(result, dict):
-                status = result.get("status", "ok")
-                if name == "discover":
-                    sub_errors = [
-                        f"{k}: {v}" for k, v in result.items() if isinstance(v, str) and v.startswith("error")
-                    ]
-                    if sub_errors:
-                        status = "partial"
+                status = "ok"
+                if isinstance(result, dict):
+                    status = result.get("status", "ok")
+                    if name == "discover":
+                        sub_errors = [
+                            f"{k}: {v}" for k, v in result.items() if isinstance(v, str) and v.startswith("error")
+                        ]
+                        if sub_errors:
+                            status = "partial"
 
-        except Exception as e:
-            elapsed = time.time() - t0
-            status = f"error: {e}"
-            log.exception("Stage '%s' crashed", name)
-            console.print(f"\n  [red]STAGE FAILED:[/red] {e}")
+            except Exception as e:
+                elapsed = time.time() - t0
+                status = f"error: {e}"
+                log.exception("Stage '%s' crashed", name)
+                console.print(f"\n  [red]STAGE FAILED:[/red] {e}")
 
-        results.append({"stage": name, "status": status, "elapsed": elapsed})
-        if status not in ("ok", "partial"):
-            errors[name] = status
+            results.append({"stage": name, "status": status, "elapsed": elapsed})
+            if status not in ("ok", "partial"):
+                errors[name] = status
 
-        console.print(f"\n  Stage '{name}' completed in {elapsed:.1f}s — {status}")
+            console.print(f"\n  Stage '{name}' completed in {elapsed:.1f}s — {status}")
 
     total_elapsed = time.time() - pipeline_start
     return {"stages": results, "errors": errors, "elapsed": total_elapsed}

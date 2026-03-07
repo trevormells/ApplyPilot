@@ -20,6 +20,9 @@ def _configure_logging() -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%H:%M:%S",
     )
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.StreamHandler):
+            handler.setLevel(logging.CRITICAL)
 
     # Keep LiteLLM internals quiet by default; warnings/errors still surface.
     for name in ("LiteLLM", "litellm"):
@@ -28,15 +31,26 @@ def _configure_logging() -> None:
         noisy.setLevel(logging.WARNING)
         noisy.propagate = True
 
-    # Route verbose tailor/cover loggers to files instead of the terminal.
+    # Route verbose tailor/cover loggers to stage files instead of the terminal.
     from applypilot.config import LOG_DIR
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     file_fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
-    for logger_name in ("applypilot.scoring.tailor", "applypilot.scoring.cover_letter"):
+    stage_logs = {
+        "applypilot.scoring.tailor": "tailor.log",
+        "applypilot.scoring.cover_letter": "cover.log",
+    }
+    for logger_name, filename in stage_logs.items():
         file_log = logging.getLogger(logger_name)
         file_log.propagate = False
-        handler = logging.FileHandler(LOG_DIR / f"{logger_name.split('.')[-1]}.log", encoding="utf-8")
+        existing = [
+            h
+            for h in file_log.handlers
+            if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) == str(LOG_DIR / filename)
+        ]
+        if existing:
+            continue
+        handler = logging.FileHandler(LOG_DIR / filename, encoding="utf-8")
         handler.setFormatter(file_fmt)
         file_log.addHandler(handler)
 

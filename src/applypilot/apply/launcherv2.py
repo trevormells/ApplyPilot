@@ -50,6 +50,14 @@ from applypilot.apply.dashboard import (
     get_totals,
 )
 from applypilot.apply.captcha import build_captcha_tools
+from applypilot.apply.browser_use_logs import (
+    browser_use_agent_kwargs,
+    browser_use_error_path,
+    browser_use_history_path,
+    browser_use_log_stem,
+    browser_use_text_path,
+    save_browser_use_history,
+)
 from applypilot.apply import db as launcherv2_db
 
 logger = logging.getLogger(__name__)
@@ -223,6 +231,7 @@ async def _run_browser_use_agent(
     model: str,
     cancel_event: threading.Event,
     cost_baseline: float = 0.0,
+    log_stem: Path | None = None,
 ) -> AgentHistoryList[AgentStructuredOutput]:
     """Execute a browser-use agent and return the raw AgentHistoryList result."""
     cdp_url = f"http://127.0.0.1:{port}"
@@ -236,7 +245,16 @@ async def _run_browser_use_agent(
     try:
         llm = _build_llm(model=model)
         captcha_tools = build_captcha_tools()
-        agent = Agent(task=task, llm=llm, browser=browser, calculate_cost=True, tools=captcha_tools)
+        agent_kwargs: dict[str, object] = {
+            "task": task,
+            "llm": llm,
+            "browser": browser,
+            "calculate_cost": True,
+            "tools": captcha_tools,
+        }
+        if log_stem is not None:
+            agent_kwargs.update(browser_use_agent_kwargs(Agent, log_stem))
+        agent = Agent(**agent_kwargs)
 
         def _on_step(*args):
             # browser_use callback signature: (browser_state, agent_output, step_number)
@@ -311,6 +329,7 @@ def run_job(
     add_event(f"[W{worker_id}] Starting: {job['title'][:40]} @ {job.get('site', '')}")
 
     worker_log = config.LOG_DIR / f"worker-{worker_id}.log"
+    browser_log_stem = browser_use_log_stem(job.get("site"), worker_id)
     ts_header = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_header = (
         f"\n{'=' * 60}\n"
@@ -339,6 +358,7 @@ def run_job(
                 model=model,
                 cancel_event=cancel_event,
                 cost_baseline=cost_baseline,
+                log_stem=browser_log_stem,
             )
         )
         output = _extract_agent_output(result_obj)
@@ -351,8 +371,7 @@ def run_job(
         err_text = str(e).strip() or e.__class__.__name__
         full_trace = traceback.format_exc()
         logger.exception("Worker %d apply run failed for %s", worker_id, job.get("application_url") or job.get("url"))
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        error_log = config.LOG_DIR / f"browser_use_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}_error.txt"
+        error_log = browser_use_error_path(browser_log_stem)
 
         with open(worker_log, "a", encoding="utf-8") as lf:
             lf.write(log_header)
@@ -375,14 +394,13 @@ def run_job(
         lf.write(log_header)
         lf.write(output + "\n")
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    site_slug = job.get("site", "unknown")[:20]
-    job_log = config.LOG_DIR / f"browser_use_{ts}_w{worker_id}_{site_slug}.txt"
+    job_log = browser_use_text_path(browser_log_stem)
     steps_text = "\n".join(result_obj.agent_steps())
     job_log.write_text(
         f"{output}\n\n{'=' * 60}\nAGENT HISTORY\n{'=' * 60}\n{steps_text}",
         encoding="utf-8",
     )
+    save_browser_use_history(result_obj, browser_use_history_path(browser_log_stem), logger=logger)
 
     if action_count > 0:
         update_state(worker_id, actions=action_count, last_action=f"{action_count} action(s)")

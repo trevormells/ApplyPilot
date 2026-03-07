@@ -16,6 +16,7 @@ git clone https://github.com/Pickle-Pixel/ApplyPilot.git
 cd ApplyPilot
 python3.13 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 pip install -e ".[dev]"
 playwright install chromium
 ```
@@ -27,6 +28,7 @@ This installs ApplyPilot in editable mode with all development dependencies (pyt
 ```bash
 applypilot --version
 pytest tests/ -v
+.venv/bin/pytest tests/ -v
 ruff check src/
 ```
 
