@@ -141,7 +141,7 @@ def run(
     """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
     _bootstrap()
 
-    from applypilot.pipeline import run_pipeline
+    from applypilot.runner.pipeline import run_pipeline
 
     stage_list = stages if stages else ["all"]
 
@@ -359,7 +359,7 @@ def dashboard() -> None:
     """Generate and open the HTML dashboard in your browser."""
     _bootstrap()
 
-    from applypilot.view import open_dashboard
+    from applypilot.frontend.view import open_dashboard
 
     open_dashboard()
 

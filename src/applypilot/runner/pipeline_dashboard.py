@@ -18,7 +18,8 @@ from rich.text import Text
 
 from applypilot import config
 from applypilot.database import get_connection
-from applypilot.stage_logging import stage_log_path
+
+from .stage_logging import stage_log_path
 
 
 _STATUS_STYLE: dict[str, str] = {

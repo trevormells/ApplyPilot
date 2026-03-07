@@ -24,8 +24,9 @@ from rich.table import Table
 
 from applypilot.config import load_env, ensure_dirs
 from applypilot.database import init_db, get_connection, get_stats
-from applypilot.pipeline_dashboard import PipelineDashboard
-from applypilot.stage_logging import StageConsole, capture_stage_output
+
+from .pipeline_dashboard import PipelineDashboard
+from .stage_logging import StageConsole, capture_stage_output
 
 log = logging.getLogger(__name__)
 console = StageConsole(Console())

@@ -5,7 +5,7 @@ from pathlib import Path
 from rich.console import Console
 
 from applypilot import config
-from applypilot.stage_logging import StageConsole, capture_stage_output, stage_log_path
+from applypilot.runner.stage_logging import StageConsole, capture_stage_output, stage_log_path
 
 
 def test_stage_log_path_uses_main_log_dir(monkeypatch) -> None:

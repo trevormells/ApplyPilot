@@ -14,12 +14,12 @@ from rich.console import Console
 from applypilot import config
 
 _STAGE_LOGGER_NAMES: dict[str, tuple[str, ...]] = {
-    "discover": ("applypilot.pipeline", "applypilot.discovery"),
-    "enrich": ("applypilot.pipeline", "applypilot.enrichment"),
-    "score": ("applypilot.pipeline", "applypilot.scoring.scorer"),
-    "tailor": ("applypilot.pipeline", "applypilot.scoring.tailor"),
-    "cover": ("applypilot.pipeline", "applypilot.scoring.cover_letter"),
-    "pdf": ("applypilot.pipeline", "applypilot.scoring.pdf"),
+    "discover": ("applypilot.runner.pipeline", "applypilot.discovery"),
+    "enrich": ("applypilot.runner.pipeline", "applypilot.enrichment"),
+    "score": ("applypilot.runner.pipeline", "applypilot.scoring.scorer"),
+    "tailor": ("applypilot.runner.pipeline", "applypilot.scoring.tailor"),
+    "cover": ("applypilot.runner.pipeline", "applypilot.scoring.cover_letter"),
+    "pdf": ("applypilot.runner.pipeline", "applypilot.scoring.pdf"),
 }
 
 _FILE_FORMATTER = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
