@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 
 from rich.console import Console, Group
-from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -255,18 +254,11 @@ class PipelineDashboard:
             }
         return self._render(snapshot)
 
-    def _render(self, snapshot: dict) -> Layout:
+    def _render(self, snapshot: dict) -> Group:
         header = self._render_header(snapshot)
         stages = self._render_stage_table(snapshot["stages"])
         recent = self._render_recent_panel(snapshot["recent_stage"], snapshot["recent_lines"])
-
-        layout = Layout()
-        layout.split_column(
-            Layout(header, size=9),
-            Layout(stages, ratio=1),
-            Layout(recent, size=9),
-        )
-        return layout
+        return Group(header, stages, recent)
 
     def _render_header(self, snapshot: dict) -> Panel:
         grid = Table.grid(expand=True)
