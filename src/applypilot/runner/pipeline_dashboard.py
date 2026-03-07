@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
 import threading
 import time
 from pathlib import Path
@@ -12,7 +11,6 @@ from pathlib import Path
 from rich.console import Console, Group
 from rich.layout import Layout
 from rich.panel import Panel
-from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 
@@ -255,18 +253,13 @@ class PipelineDashboard:
     def _render(self, snapshot: dict) -> Layout:
         header = self._render_header(snapshot)
         stages = self._render_stage_table(snapshot["stages"])
-        active = self._render_active_panel(snapshot["stages"])
         recent = self._render_recent_panel(snapshot["recent_stage"], snapshot["recent_lines"])
 
         layout = Layout()
         layout.split_column(
             Layout(header, size=8),
-            Layout(name="body", ratio=1),
+            Layout(stages, ratio=1),
             Layout(recent, size=9),
-        )
-        layout["body"].split_row(
-            Layout(stages, ratio=3),
-            Layout(active, ratio=2),
         )
         return layout
 
@@ -315,41 +308,35 @@ class PipelineDashboard:
                 summary,
             )
 
-        return Panel(table, title="Stages", border_style="cyan")
-
-    def _render_active_panel(self, stages: list[StageView]) -> Panel:
         active = [stage for stage in stages if stage.status == "active"]
-        if not active:
-            done = [stage for stage in stages if stage.finished_at is not None]
-            if not done:
-                return Panel("Waiting for pipeline start", title="Current Stage", border_style="yellow")
-            latest = max(done, key=lambda stage: stage.finished_at or 0)
-            body = Table.grid(padding=(0, 1))
-            body.add_row(f"[bold]{latest.name}[/bold]")
-            body.add_row(f"Status: {_STATUS_LABEL.get(latest.status, latest.status.upper())}")
-            body.add_row(f"Progress: {latest.processed}/{latest.total} {latest.unit}")
-            if latest.summary:
-                body.add_row(latest.summary)
-            return Panel(body, title="Last Stage", border_style="green")
-
-        focus = max(active, key=lambda stage: stage.started_at or 0)
-        total = max(1, focus.total)
-        body = Table.grid(padding=(0, 1))
-        body.add_row(f"[bold]{focus.name}[/bold]")
-        body.add_row(f"{focus.processed}/{focus.total} {focus.unit}")
-        body.add_row(ProgressBar(total=total, completed=min(focus.processed, total), width=28))
-        if focus.summary:
-            body.add_row(focus.summary)
-        body.add_row(f"Started: {datetime.fromtimestamp(focus.started_at or time.time()).strftime('%H:%M:%S')}")
-
-        if len(active) > 1:
-            names = ", ".join(stage.name for stage in active)
-            title = "Active Stages"
-            body.add_row(f"Also running: {names}")
+        if active:
+            focus = max(active, key=lambda stage: stage.started_at or 0)
+            others = [stage.name for stage in active if stage.name != focus.name]
+            summary = (
+                f"Current: {focus.name} "
+                f"({_STATUS_LABEL.get(focus.status, focus.status.upper())}, "
+                f"{focus.processed}/{focus.total} {focus.unit})"
+            )
+            if focus.summary:
+                summary = f"{summary} - {focus.summary}"
+            if others:
+                summary = f"{summary} | Also running: {', '.join(others)}"
         else:
-            title = "Current Stage"
+            done = [stage for stage in stages if stage.finished_at is not None]
+            if done:
+                latest = max(done, key=lambda stage: stage.finished_at or 0)
+                summary = (
+                    f"Last: {latest.name} "
+                    f"({_STATUS_LABEL.get(latest.status, latest.status.upper())}, "
+                    f"{latest.processed}/{latest.total} {latest.unit})"
+                )
+                if latest.summary:
+                    summary = f"{summary} - {latest.summary}"
+            else:
+                summary = "Waiting for pipeline start."
 
-        return Panel(body, title=title, border_style="yellow")
+        content = Group(Text(summary, style="bold"), table)
+        return Panel(content, title="Stages", border_style="cyan")
 
     def _render_recent_panel(self, stage_name: str, lines: list[str]) -> Panel:
         if not lines:
