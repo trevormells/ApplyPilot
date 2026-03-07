@@ -1,5 +1,6 @@
 """ApplyPilot configuration: paths, platform detection, user data."""
 
+from importlib.util import find_spec
 import os
 import platform
 import shutil
@@ -202,7 +203,7 @@ def get_tier() -> int:
 
     Tier 1 (Discovery):            Python + pip
     Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
+    Tier 3 (Full Auto-Apply):       + browser-use + Chrome
     """
     load_env()
 
@@ -217,14 +218,14 @@ def get_tier() -> int:
     if not has_llm:
         return 1
 
-    has_claude = shutil.which("claude") is not None
+    has_browser_use = find_spec("browser_use") is not None
     try:
         get_chrome_path()
         has_chrome = True
     except FileNotFoundError:
         has_chrome = False
 
-    if has_claude and has_chrome:
+    if has_browser_use and has_chrome:
         return 3
 
     return 2
@@ -259,8 +260,8 @@ def check_tier(required: int, feature: str) -> None:
             "(or set LLM_MODEL with LLM_API_KEY)"
         )
     if required >= 3:
-        if not shutil.which("claude"):
-            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")
+        if find_spec("browser_use") is None:
+            missing.append("browser-use — install with [bold]pip install -e .[/bold] or [bold]pip install browser-use[/bold]")
         try:
             get_chrome_path()
         except FileNotFoundError:

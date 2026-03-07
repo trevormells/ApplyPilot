@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from importlib.util import find_spec
 from pathlib import Path
 
 from rich.console import Console
@@ -565,25 +566,35 @@ def _setup_ai_features() -> None:
 # ---------------------------------------------------------------------------
 
 def _setup_auto_apply() -> None:
-    """Configure autonomous job application (requires Claude Code CLI)."""
+    """Configure autonomous job application (requires browser-use and Chrome)."""
     console.print(Panel(
         "[bold]Step 5: Auto-Apply (optional)[/bold]\n"
         "ApplyPilot can autonomously fill and submit job applications\n"
-        "using Claude Code as the browser agent."
+        "using browser-use in a real Chrome session."
     ))
 
     if not Confirm.ask("Enable autonomous job applications?", default=True):
         console.print("[dim]You can apply manually using the tailored resumes ApplyPilot generates.[/dim]")
         return
 
-    # Check for Claude Code CLI
-    if shutil.which("claude"):
-        console.print("[green]Claude Code CLI detected.[/green]")
+    if find_spec("browser_use") is not None:
+        console.print("[green]browser-use detected.[/green]")
     else:
         console.print(
-            "[yellow]Claude Code CLI not found on PATH.[/yellow]\n"
-            "Install it from: [bold]https://claude.ai/code[/bold]\n"
-            "Auto-apply won't work until Claude Code is installed."
+            "[yellow]browser-use is not installed in this Python environment.[/yellow]\n"
+            "Install it with: [bold]pip install -e .[/bold] or [bold]pip install browser-use[/bold]\n"
+            "Auto-apply won't work until browser-use is available."
+        )
+
+    from applypilot.config import get_chrome_path
+
+    try:
+        chrome_path = get_chrome_path()
+        console.print(f"[green]Chrome detected:[/green] {chrome_path}")
+    except FileNotFoundError:
+        console.print(
+            "[yellow]Chrome/Chromium not found.[/yellow]\n"
+            "Install Chrome or set [bold]CHROME_PATH[/bold] before using auto-apply."
         )
 
     # Optional: CapSolver for CAPTCHAs
@@ -669,7 +680,7 @@ def run_wizard() -> None:
     if tier == 1:
         unlock_hint = "\n[dim]To unlock Tier 2: configure an LLM API key (re-run [bold]applypilot init[/bold]).[/dim]"
     elif tier == 2:
-        unlock_hint = "\n[dim]To unlock Tier 3: install Claude Code CLI + Chrome.[/dim]"
+        unlock_hint = "\n[dim]To unlock Tier 3: install browser-use + Chrome.[/dim]"
 
     console.print(
         Panel.fit(

@@ -43,7 +43,7 @@ applypilot apply --dry-run  # fill forms without submitting
 ## Two Paths
 
 ### Full Pipeline (recommended)
-**Requires:** Python 3.11+, Node.js (for npx), an LLM key (Gemini/OpenAI/Claude) or `LLM_URL`, Claude Code CLI, Chrome
+**Requires:** Python 3.11+, `browser-use`, an LLM key (Gemini/OpenAI/Claude) or `LLM_URL`, Chrome
 
 Runs all 6 stages, from job discovery to autonomous application submission. This is the full power of ApplyPilot.
 
@@ -63,7 +63,7 @@ Runs stages 1-5: discovers jobs, scores them, tailors your resume, generates cov
 | **3. Score** | AI rates every job 1-10 based on your resume and preferences. Only high-fit jobs proceed |
 | **4. Tailor** | AI rewrites your resume per job: reorganizes, emphasizes relevant experience, adds keywords. Never fabricates |
 | **5. Cover Letter** | AI generates a targeted cover letter per job |
-| **6. Auto-Apply** | Claude Code navigates application forms, fills fields, uploads documents, answers questions, and submits |
+| **6. Auto-Apply** | browser-use navigates application forms, fills fields, uploads documents, answers questions, and submits |
 
 Each stage is independent. Run them all or pick what you need.
 
@@ -87,11 +87,9 @@ Each stage is independent. Run them all or pick what you need.
 | Component | Required For | Details |
 |-----------|-------------|---------|
 | Python 3.11+ | Everything | Core runtime |
-| Node.js 18+ | Auto-apply | Needed for `npx` to run Playwright MCP server |
+| browser-use | Auto-apply | Python agent runtime that drives the browser session |
 | LLM credentials or local endpoint | Scoring, tailoring, cover letters | Set one of `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `LLM_URL`. Optional: set `LLM_MODEL` (for example `gemini/gemini-3.0-flash`) to override the default model. |
 | Chrome/Chromium | Auto-apply | Auto-detected on most systems |
-| Claude Code CLI | Auto-apply | Install from [claude.ai/code](https://claude.ai/code) |
-
 **Gemini API key is free.** Get one at [aistudio.google.com](https://aistudio.google.com). OpenAI, Claude, and local models (Ollama/llama.cpp/vLLM) are also supported.
 ApplyPilot uses Gemini through LiteLLM's native Gemini provider path, and Gemini API version routing is owned by LiteLLM.
 
@@ -149,12 +147,10 @@ Generates a custom resume per job: reorders experience, emphasizes relevant skil
 Writes a targeted cover letter per job referencing the specific company, role, and how your experience maps to their requirements.
 
 ### Auto-Apply
-Claude Code launches a Chrome instance, navigates to each application page, detects the form type, fills personal information and work history, uploads the tailored resume and cover letter, answers screening questions with AI, and submits. A live dashboard shows progress in real-time.
-
-The Playwright MCP server is configured automatically at runtime per worker. No manual MCP setup needed.
+browser-use launches a Chrome instance, navigates to each application page, detects the form type, fills personal information and work history, uploads the tailored resume and cover letter, answers screening questions with AI, and submits. A live dashboard shows progress in real-time.
 
 ```bash
-# Utility modes (no Chrome/Claude needed)
+# Utility modes (no browser session needed)
 applypilot apply --mark-applied URL    # manually mark a job as applied
 applypilot apply --mark-failed URL     # manually mark a job as failed
 applypilot apply --reset-failed        # reset all failed jobs for retry

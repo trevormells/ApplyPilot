@@ -5,6 +5,13 @@ All notable changes to ApplyPilot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Browser-use launcher is canonical** - deprecated `src/applypilot/apply/launcher.py`
+  to a thin compatibility wrapper, removed the legacy Claude-specific prompt module,
+  and aligned setup/tier/docs with `launcherv2.py`
+
 ## [0.2.0] - 2026-02-17
 
 ### Added
