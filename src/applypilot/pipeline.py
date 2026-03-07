@@ -18,11 +18,13 @@ import time
 from datetime import datetime
 
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
 from applypilot.config import load_env, ensure_dirs
 from applypilot.database import init_db, get_connection, get_stats
+from applypilot.pipeline_dashboard import PipelineDashboard
 from applypilot.stage_logging import StageConsole, capture_stage_output
 
 log = logging.getLogger(__name__)
@@ -61,7 +63,7 @@ _UPSTREAM: dict[str, str | None] = {
 # ---------------------------------------------------------------------------
 
 
-def _run_discover(workers: int = 1) -> dict:
+def _run_discover(workers: int = 1, dashboard: PipelineDashboard | None = None) -> dict:
     """Stage: Job discovery — JobSpy, Workday, and smart-extract scrapers."""
     stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
 
@@ -72,10 +74,14 @@ def _run_discover(workers: int = 1) -> dict:
 
         run_discovery()
         stats["jobspy"] = "ok"
+        if dashboard is not None:
+            dashboard.advance_stage("discover", summary="JobSpy crawl complete")
     except Exception as e:
         log.error("JobSpy crawl failed: %s", e)
         console.log_only(f"  [red]JobSpy error:[/red] {e}")
         stats["jobspy"] = f"error: {e}"
+        if dashboard is not None:
+            dashboard.advance_stage("discover", summary=f"JobSpy error: {e}")
 
     # Workday corporate scraper
     console.log_only("  [cyan]Workday corporate scraper...[/cyan]")
@@ -84,10 +90,14 @@ def _run_discover(workers: int = 1) -> dict:
 
         run_workday_discovery(workers=workers)
         stats["workday"] = "ok"
+        if dashboard is not None:
+            dashboard.advance_stage("discover", summary="Workday crawl complete")
     except Exception as e:
         log.error("Workday scraper failed: %s", e)
         console.log_only(f"  [red]Workday error:[/red] {e}")
         stats["workday"] = f"error: {e}"
+        if dashboard is not None:
+            dashboard.advance_stage("discover", summary=f"Workday error: {e}")
 
     # Smart extract
     console.log_only("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
@@ -96,10 +106,14 @@ def _run_discover(workers: int = 1) -> dict:
 
         run_smart_extract(workers=workers)
         stats["smartextract"] = "ok"
+        if dashboard is not None:
+            dashboard.advance_stage("discover", summary="Smart extract complete")
     except Exception as e:
         log.error("Smart extract failed: %s", e)
         console.log_only(f"  [red]Smart extract error:[/red] {e}")
         stats["smartextract"] = f"error: {e}"
+        if dashboard is not None:
+            dashboard.advance_stage("discover", summary=f"Smart extract error: {e}")
 
     return stats
 
@@ -266,6 +280,7 @@ def _run_stage_streaming(
     min_score: int = 7,
     workers: int = 1,
     validation_mode: str = "normal",
+    dashboard: PipelineDashboard | None = None,
 ) -> None:
     """Run a single stage in streaming mode: loop until upstream done + no work.
 
@@ -284,26 +299,35 @@ def _run_stage_streaming(
     upstream = _UPSTREAM[stage]
 
     with capture_stage_output(stage, console):
-        console.print(f"\n{'=' * 70}")
-        console.print(f"  [bold]STAGE: {stage}[/bold] — {STAGE_META[stage]['desc']} (streaming)")
-        console.print(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
-        console.print(f"{'=' * 70}")
+        console.log_only(f"\n{'=' * 70}")
+        console.log_only(f"  [bold]STAGE: {stage}[/bold] — {STAGE_META[stage]['desc']} (streaming)")
+        console.log_only(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
+        console.log_only(f"{'=' * 70}")
 
         if stage == "discover":
             # Discover runs once (its sub-scrapers already do their full crawl)
             try:
+                if dashboard is not None:
+                    dashboard.start_stage(stage)
+                    kwargs["dashboard"] = dashboard
                 result = runner(**kwargs)
                 tracker.mark_done(stage, result)
             except Exception as e:
                 log.exception("Stage '%s' crashed", stage)
                 tracker.mark_done(stage, {"status": f"error: {e}"})
-                console.print(f"\n  [red]STAGE FAILED:[/red] {e}")
+                console.log_only(f"\n  [red]STAGE FAILED:[/red] {e}")
+                if dashboard is not None:
+                    dashboard.finish_stage(stage, "error", summary=str(e))
             else:
-                console.print(f"\n  Stage '{stage}' completed — ok")
+                console.log_only(f"\n  Stage '{stage}' completed — ok")
+                if dashboard is not None:
+                    dashboard.finish_stage(stage, "ok", summary="Discovery complete")
             return
 
         # For downstream stages: loop until upstream done + no pending work
         passes = 0
+        if dashboard is not None:
+            dashboard.start_stage(stage)
         while not stop_event.is_set():
             # Wait a bit for upstream to produce some work before first run
             if passes == 0 and upstream and not tracker.is_done(upstream):
@@ -326,7 +350,9 @@ def _run_stage_streaming(
                     break
 
         tracker.mark_done(stage, {"status": "ok", "passes": passes})
-        console.print(f"\n  Stage '{stage}' completed after {passes} pass(es)")
+        console.log_only(f"\n  Stage '{stage}' completed after {passes} pass(es)")
+        if dashboard is not None:
+            dashboard.finish_stage(stage, "ok", summary=f"{passes} pass(es)")
 
 
 # ---------------------------------------------------------------------------
@@ -334,19 +360,27 @@ def _run_stage_streaming(
 # ---------------------------------------------------------------------------
 
 
-def _run_sequential(ordered: list[str], min_score: int, workers: int = 1, validation_mode: str = "normal") -> dict:
+def _run_sequential(
+    ordered: list[str],
+    min_score: int,
+    workers: int = 1,
+    validation_mode: str = "normal",
+    dashboard: PipelineDashboard | None = None,
+) -> dict:
     """Execute stages one at a time (original behavior)."""
     results: list[dict] = []
     errors: dict[str, str] = {}
     pipeline_start = time.time()
 
     for name in ordered:
+        if dashboard is not None:
+            dashboard.start_stage(name)
         with capture_stage_output(name, console):
             meta = STAGE_META[name]
-            console.print(f"\n{'=' * 70}")
-            console.print(f"  [bold]STAGE: {name}[/bold] — {meta['desc']}")
-            console.print(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
-            console.print(f"{'=' * 70}")
+            console.log_only(f"\n{'=' * 70}")
+            console.log_only(f"  [bold]STAGE: {name}[/bold] — {meta['desc']}")
+            console.log_only(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
+            console.log_only(f"{'=' * 70}")
 
             t0 = time.time()
             runner = _STAGE_RUNNERS[name]
@@ -358,6 +392,8 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1, valida
                     kwargs["validation_mode"] = validation_mode
                 if name in ("discover", "enrich"):
                     kwargs["workers"] = workers
+                if dashboard is not None and name == "discover":
+                    kwargs["dashboard"] = dashboard
                 result = runner(**kwargs)
                 elapsed = time.time() - t0
 
@@ -375,26 +411,36 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1, valida
                 elapsed = time.time() - t0
                 status = f"error: {e}"
                 log.exception("Stage '%s' crashed", name)
-                console.print(f"\n  [red]STAGE FAILED:[/red] {e}")
+                console.log_only(f"\n  [red]STAGE FAILED:[/red] {e}")
 
             results.append({"stage": name, "status": status, "elapsed": elapsed})
             if status not in ("ok", "partial"):
                 errors[name] = status
 
-            console.print(f"\n  Stage '{name}' completed in {elapsed:.1f}s — {status}")
+            console.log_only(f"\n  Stage '{name}' completed in {elapsed:.1f}s — {status}")
+            if dashboard is not None:
+                summary = meta["desc"] if status == "ok" else status
+                dashboard.finish_stage(name, status if status in ("ok", "partial", "error") else "error", summary=summary)
 
     total_elapsed = time.time() - pipeline_start
     return {"stages": results, "errors": errors, "elapsed": total_elapsed}
 
 
-def _run_streaming(ordered: list[str], min_score: int, workers: int = 1, validation_mode: str = "normal") -> dict:
+def _run_streaming(
+    ordered: list[str],
+    min_score: int,
+    workers: int = 1,
+    validation_mode: str = "normal",
+    dashboard: PipelineDashboard | None = None,
+) -> dict:
     """Execute stages concurrently with DB as conveyor belt."""
     tracker = _StageTracker()
     stop_event = threading.Event()
     pipeline_start = time.time()
 
-    console.print("\n  [bold cyan]STREAMING MODE[/bold cyan] — stages run concurrently")
-    console.print(f"  Poll interval: {_STREAM_POLL_INTERVAL}s\n")
+    if dashboard is None:
+        console.print("\n  [bold cyan]STREAMING MODE[/bold cyan] — stages run concurrently")
+        console.print(f"  Poll interval: {_STREAM_POLL_INTERVAL}s\n")
 
     # Mark stages NOT in `ordered` as done so downstream doesn't wait for them
     for stage in STAGE_ORDER:
@@ -409,22 +455,25 @@ def _run_streaming(ordered: list[str], min_score: int, workers: int = 1, validat
         start_times[name] = time.time()
         t = threading.Thread(
             target=_run_stage_streaming,
-            args=(name, tracker, stop_event, min_score, workers, validation_mode),
+            args=(name, tracker, stop_event, min_score, workers, validation_mode, dashboard),
             name=f"stage-{name}",
             daemon=True,
         )
         threads[name] = t
         t.start()
-        console.print(f"  [dim]Started thread:[/dim] {name}")
+        if dashboard is None:
+            console.print(f"  [dim]Started thread:[/dim] {name}")
 
     # Wait for all threads to finish
     try:
         for name in ordered:
             threads[name].join()
             elapsed = time.time() - start_times[name]
-            console.print(f"  [green]Completed:[/green] {name} ({elapsed:.1f}s)")
+            if dashboard is None:
+                console.print(f"  [green]Completed:[/green] {name} ({elapsed:.1f}s)")
     except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted — stopping stages...[/yellow]")
+        if dashboard is None:
+            console.print("\n[yellow]Interrupted — stopping stages...[/yellow]")
         stop_event.set()
         for t in threads.values():
             t.join(timeout=10)
@@ -478,25 +527,22 @@ def run_pipeline(
         stages = ["all"]
     ordered = _resolve_stages(stages)
 
-    # Banner
     mode = "streaming" if stream else "sequential"
-    console.print()
-    console.print(
-        Panel.fit(
-            f"[bold]ApplyPilot Pipeline[/bold] ({mode})",
-            border_style="blue",
-        )
-    )
-    console.print(f"  Min score:  {min_score}")
-    console.print(f"  Workers:    {workers}")
-    console.print(f"  Validation: {validation_mode}")
-    console.print(f"  Stages:     {' -> '.join(ordered)}")
-
-    # Pre-run stats
     pre_stats = get_stats()
-    console.print(f"  DB:        {pre_stats['total']} jobs, {pre_stats['pending_detail']} pending enrichment")
 
     if dry_run:
+        console.print()
+        console.print(
+            Panel.fit(
+                f"[bold]ApplyPilot Pipeline[/bold] ({mode})",
+                border_style="blue",
+            )
+        )
+        console.print(f"  Min score:  {min_score}")
+        console.print(f"  Workers:    {workers}")
+        console.print(f"  Validation: {validation_mode}")
+        console.print(f"  Stages:     {' -> '.join(ordered)}")
+        console.print(f"  DB:        {pre_stats['total']} jobs, {pre_stats['pending_detail']} pending enrichment")
         console.print(f"\n  [yellow]DRY RUN[/yellow] — would execute ({mode}):")
         for name in ordered:
             meta = STAGE_META[name]
@@ -504,11 +550,58 @@ def run_pipeline(
         console.print("\n  No changes made.")
         return {"stages": [], "errors": {}, "elapsed": 0.0}
 
-    # Execute
-    if stream:
-        result = _run_streaming(ordered, min_score, workers=workers, validation_mode=validation_mode)
+    use_dashboard = bool(console.is_terminal)
+    if use_dashboard:
+        dashboard = PipelineDashboard(
+            ordered,
+            STAGE_META,
+            mode=mode,
+            min_score=min_score,
+            workers=workers,
+            validation_mode=validation_mode,
+            pre_total_jobs=pre_stats["total"],
+            pre_pending_detail=pre_stats["pending_detail"],
+            terminal_console=console,
+        )
+        dashboard.start()
+        try:
+            with Live(dashboard, console=console.terminal_console, refresh_per_second=4, transient=False):
+                if stream:
+                    result = _run_streaming(
+                        ordered,
+                        min_score,
+                        workers=workers,
+                        validation_mode=validation_mode,
+                        dashboard=dashboard,
+                    )
+                else:
+                    result = _run_sequential(
+                        ordered,
+                        min_score,
+                        workers=workers,
+                        validation_mode=validation_mode,
+                        dashboard=dashboard,
+                    )
+        finally:
+            dashboard.stop()
+            console.print()
     else:
-        result = _run_sequential(ordered, min_score, workers=workers, validation_mode=validation_mode)
+        console.print()
+        console.print(
+            Panel.fit(
+                f"[bold]ApplyPilot Pipeline[/bold] ({mode})",
+                border_style="blue",
+            )
+        )
+        console.print(f"  Min score:  {min_score}")
+        console.print(f"  Workers:    {workers}")
+        console.print(f"  Validation: {validation_mode}")
+        console.print(f"  Stages:     {' -> '.join(ordered)}")
+        console.print(f"  DB:        {pre_stats['total']} jobs, {pre_stats['pending_detail']} pending enrichment")
+        if stream:
+            result = _run_streaming(ordered, min_score, workers=workers, validation_mode=validation_mode)
+        else:
+            result = _run_sequential(ordered, min_score, workers=workers, validation_mode=validation_mode)
 
     # Summary table
     console.print(f"\n{'=' * 70}")

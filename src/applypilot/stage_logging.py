@@ -38,6 +38,10 @@ class StageConsole:
         self._terminal_console = terminal_console
         self._local = threading.local()
 
+    @property
+    def terminal_console(self) -> Console:
+        return self._terminal_console
+
     @contextlib.contextmanager
     def capture(self, file_console: Console) -> Iterator[None]:
         """Mirror console output in the current thread to the given file console."""
