@@ -12,7 +12,14 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
-from jobspy import scrape_jobs
+try:
+    from jobspy import scrape_jobs
+except ImportError as exc:
+    raise ImportError(
+        "JobSpy is required for discovery but is not installed in this environment. "
+        "Reinstall ApplyPilot from source so pip can fetch the pinned JobSpy git tag: "
+        "pip install -e ."
+    ) from exc
 
 from applypilot import config
 from applypilot.database import get_connection, init_db

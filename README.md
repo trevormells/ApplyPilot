@@ -25,8 +25,7 @@ ApplyPilot is a 6-stage autonomous job application pipeline. It discovers jobs a
 Three commands. That's it.
 
 ```bash
-pip install applypilot
-pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex
+pip install -e .
 applypilot init          # one-time setup: resume, profile, preferences, API keys
 applypilot doctor        # verify your setup — shows what's installed and what's missing
 applypilot run           # discover > enrich > score > tailor > cover letters
@@ -36,7 +35,7 @@ applypilot apply -w 3    # parallel apply (3 Chrome instances)
 applypilot apply --dry-run  # fill forms without submitting
 ```
 
-> **Why two install commands?** `python-jobspy` pins an exact numpy version in its metadata that conflicts with pip's resolver, but works fine at runtime with any modern numpy. The `--no-deps` flag bypasses the resolver; the second command installs jobspy's actual runtime dependencies. Everything except `python-jobspy` installs normally.
+> **Why install from source?** ApplyPilot pins JobSpy to the upstream GitHub `1.1.82` release tag instead of the PyPI package, because the published PyPI metadata still conflicts with `browser-use`. This works for source installs, but it is not suitable for publishing ApplyPilot to PyPI unchanged.
 
 ---
 
@@ -104,8 +103,6 @@ ApplyPilot uses Gemini through LiteLLM's native Gemini provider path, and Gemini
 ```bash
 GEMINI_API_KEY=your_key_here pytest -m smoke -q tests/test_gemini_smoke.py
 ```
-
-> **Note:** python-jobspy is installed separately with `--no-deps` because it pins an exact numpy version in its metadata that conflicts with pip's resolver. It works fine with modern numpy at runtime.
 
 ---
 

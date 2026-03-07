@@ -28,6 +28,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "pandas>=2.0",
+    "python-jobspy @ git+https://github.com/speedyapply/JobSpy.git@fda080a",
     "pypdf>=4.0",
     ]
 
@@ -51,6 +52,9 @@ packages = ["src/applypilot"]
 
 [tool.hatch.build]
 artifacts = ["src/applypilot/config/*.yaml"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 target-version = "py311"

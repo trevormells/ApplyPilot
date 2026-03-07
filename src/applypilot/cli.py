@@ -405,7 +405,7 @@ def doctor() -> None:
     else:
         results.append(("searches.yaml", warn_mark, "Will use example config — run 'applypilot init'"))
 
-    # jobspy (discovery dep installed separately)
+    # jobspy (discovery dependency fetched from a pinned git tag in source installs)
     try:
         import jobspy  # noqa: F401
 
@@ -415,7 +415,7 @@ def doctor() -> None:
             (
                 "python-jobspy",
                 warn_mark,
-                "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex",
+                "Reinstall from source: pip install -e .",
             )
         )
 
