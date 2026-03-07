@@ -23,7 +23,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from applypilot.config import load_env, ensure_dirs
-from applypilot.database import init_db, get_connection, get_stats
+from applypilot.database import count_pending_detail, get_connection, get_stats, init_db
 
 from .pipeline_dashboard import PipelineDashboard
 from .stage_logging import StageConsole, capture_stage_output
@@ -243,7 +243,6 @@ class _StageTracker:
 
 # SQL to count pending work for each stage
 _PENDING_SQL: dict[str, str] = {
-    "enrich": "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL",
     "score": "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL",
     "tailor": (
         "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? "
@@ -265,6 +264,8 @@ _STREAM_POLL_INTERVAL = 10
 
 def _count_pending(stage: str, min_score: int = 7) -> int:
     """Count pending work items for a stage."""
+    if stage == "enrich":
+        return count_pending_detail()
     sql = _PENDING_SQL.get(stage)
     if sql is None:
         return 0
@@ -272,6 +273,17 @@ def _count_pending(stage: str, min_score: int = 7) -> int:
     if "?" in sql:
         return conn.execute(sql, (min_score,)).fetchone()[0]
     return conn.execute(sql).fetchone()[0]
+
+
+def _format_pending_detail_summary(stats: dict) -> str:
+    """Format actionable and blocked enrichment counts for terminal output."""
+    summary = f"{stats['pending_detail']} actionable enrichment jobs"
+    blocked = stats.get("pending_detail_blocked", 0)
+    blocked_sites = stats.get("pending_detail_blocked_sites", [])
+    if blocked:
+        site_summary = ", ".join(f"{site}:{count}" for site, count in blocked_sites)
+        summary += f", {blocked} skipped blocked-site jobs ({site_summary})"
+    return summary
 
 
 def _run_stage_streaming(
@@ -543,7 +555,7 @@ def run_pipeline(
         console.print(f"  Workers:    {workers}")
         console.print(f"  Validation: {validation_mode}")
         console.print(f"  Stages:     {' -> '.join(ordered)}")
-        console.print(f"  DB:        {pre_stats['total']} jobs, {pre_stats['pending_detail']} pending enrichment")
+        console.print(f"  DB:        {pre_stats['total']} jobs, {_format_pending_detail_summary(pre_stats)}")
         console.print(f"\n  [yellow]DRY RUN[/yellow] — would execute ({mode}):")
         for name in ordered:
             meta = STAGE_META[name]
@@ -562,6 +574,8 @@ def run_pipeline(
             validation_mode=validation_mode,
             pre_total_jobs=pre_stats["total"],
             pre_pending_detail=pre_stats["pending_detail"],
+            pre_pending_detail_blocked=pre_stats["pending_detail_blocked"],
+            pre_pending_detail_blocked_sites=pre_stats["pending_detail_blocked_sites"],
             terminal_console=console,
         )
         dashboard.start()
@@ -598,7 +612,7 @@ def run_pipeline(
         console.print(f"  Workers:    {workers}")
         console.print(f"  Validation: {validation_mode}")
         console.print(f"  Stages:     {' -> '.join(ordered)}")
-        console.print(f"  DB:        {pre_stats['total']} jobs, {pre_stats['pending_detail']} pending enrichment")
+        console.print(f"  DB:        {pre_stats['total']} jobs, {_format_pending_detail_summary(pre_stats)}")
         if stream:
             result = _run_streaming(ordered, min_score, workers=workers, validation_mode=validation_mode)
         else:

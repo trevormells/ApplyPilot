@@ -22,15 +22,12 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-from applypilot.database import init_db
+from applypilot.database import build_pending_detail_select_query, init_db
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-
-# Sites that block scraping -- skip detail extraction entirely
-SKIP_DETAIL_SITES = {"glassdoor", "google", "Workopolis"}
 
 # Module-level proxy config (set from CLI or caller)
 _PROXY_CONFIG: dict | None = None
@@ -711,9 +708,8 @@ def _run_detail_scraper(
 
     Returns aggregate stats dict.
     """
-    skip_filter = " AND ".join(f"site != '{s}'" for s in SKIP_DETAIL_SITES)
-    where = f"WHERE detail_scraped_at IS NULL AND {skip_filter}"
-    rows = conn.execute(f"SELECT url, title, site FROM jobs {where} ORDER BY site").fetchall()
+    query, params = build_pending_detail_select_query()
+    rows = conn.execute(query, params).fetchall()
 
     if not rows:
         log.info("No pending jobs to scrape.")
@@ -847,12 +843,8 @@ def stream_detail(
 
     try:
         while True:
-            skip_filter = " AND ".join(f"site != '{s}'" for s in SKIP_DETAIL_SITES)
-            rows = conn.execute(
-                "SELECT url, title, site FROM jobs "
-                f"WHERE detail_scraped_at IS NULL AND {skip_filter} "
-                "ORDER BY site LIMIT 200"
-            ).fetchall()
+            query, params = build_pending_detail_select_query(limit=200)
+            rows = conn.execute(query, params).fetchall()
 
             if rows:
                 site_jobs: dict[str, list[tuple]] = {}

@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import DB_PATH
+from applypilot.config import DB_PATH, load_blocked_sites
 
 # Thread-local connection storage — each thread gets its own connection
 # (required for SQLite thread safety with parallel workers)
@@ -219,6 +219,68 @@ def ensure_columns(conn: sqlite3.Connection | None = None) -> list[str]:
     return added
 
 
+def _pending_detail_where(include_blocked_sites: bool = False) -> tuple[str, list[object]]:
+    """Build the enrichment-pending predicate, optionally excluding blocked sites."""
+    where = "detail_scraped_at IS NULL"
+    params: list[object] = []
+
+    if not include_blocked_sites:
+        blocked_sites, _ = load_blocked_sites()
+        if blocked_sites:
+            ordered_sites = sorted(blocked_sites)
+            placeholders = ",".join("?" * len(ordered_sites))
+            where += f" AND site NOT IN ({placeholders})"
+            params.extend(ordered_sites)
+
+    return where, params
+
+
+def build_pending_detail_select_query(
+    *,
+    include_blocked_sites: bool = False,
+    limit: int | None = None,
+) -> tuple[str, list[object]]:
+    """Build the shared enrichment selection query used by status and workers."""
+    where, params = _pending_detail_where(include_blocked_sites=include_blocked_sites)
+    query = f"SELECT url, title, site FROM jobs WHERE {where} ORDER BY site"
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    return query, params
+
+
+def count_pending_detail(
+    conn: sqlite3.Connection | None = None,
+    *,
+    include_blocked_sites: bool = False,
+) -> int:
+    """Count jobs pending detail enrichment."""
+    if conn is None:
+        conn = get_connection()
+    where, params = _pending_detail_where(include_blocked_sites=include_blocked_sites)
+    return int(conn.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).fetchone()[0])
+
+
+def get_pending_detail_blocked_breakdown(conn: sqlite3.Connection | None = None) -> list[tuple[str, int]]:
+    """Return blocked-site pending enrichment counts by site."""
+    if conn is None:
+        conn = get_connection()
+
+    blocked_sites, _ = load_blocked_sites()
+    if not blocked_sites:
+        return []
+
+    ordered_sites = sorted(blocked_sites)
+    placeholders = ",".join("?" * len(ordered_sites))
+    rows = conn.execute(
+        f"SELECT site, COUNT(*) FROM jobs "
+        f"WHERE detail_scraped_at IS NULL AND site IN ({placeholders}) "
+        "GROUP BY site ORDER BY COUNT(*) DESC, site",
+        ordered_sites,
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
 def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     """Return job counts by pipeline stage.
 
@@ -230,7 +292,8 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
 
     Returns:
         Dictionary with keys:
-            total, by_site, pending_detail, with_description,
+            total, by_site, pending_detail, pending_detail_blocked,
+            pending_detail_blocked_sites, with_description,
             scored, unscored, tailored, untailored_eligible,
             with_cover_letter, applied, score_distribution
     """
@@ -247,7 +310,10 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     stats["by_site"] = [(row[0], row[1]) for row in rows]
 
     # Enrichment stage
-    stats["pending_detail"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL").fetchone()[0]
+    stats["pending_detail"] = count_pending_detail(conn)
+    blocked_breakdown = get_pending_detail_blocked_breakdown(conn)
+    stats["pending_detail_blocked"] = sum(count for _, count in blocked_breakdown)
+    stats["pending_detail_blocked_sites"] = blocked_breakdown
 
     stats["with_description"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL").fetchone()[
         0
@@ -371,7 +437,6 @@ def get_jobs_by_stage(
 
     conditions = {
         "discovered": "1=1",
-        "pending_detail": "detail_scraped_at IS NULL",
         "enriched": "full_description IS NOT NULL",
         "pending_score": "full_description IS NOT NULL AND fit_score IS NULL",
         "scored": "fit_score IS NOT NULL",
@@ -385,7 +450,10 @@ def get_jobs_by_stage(
     }
 
     where = conditions.get(stage, "1=1")
-    params: list = []
+    params: list[object] = []
+
+    if stage == "pending_detail":
+        where, params = _pending_detail_where()
 
     if "?" in where and min_score is not None:
         params.append(min_score)

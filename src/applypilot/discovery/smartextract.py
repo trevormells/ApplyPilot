@@ -1098,7 +1098,10 @@ def _run_all(
     conn = init_db()
     pre_stats = get_stats(conn)
     log.info(
-        "Database: %d jobs already stored, %d pending detail scrape", pre_stats["total"], pre_stats["pending_detail"]
+        "Database: %d jobs already stored, %d actionable pending detail scrape jobs, %d blocked-site skipped",
+        pre_stats["total"],
+        pre_stats["pending_detail"],
+        pre_stats.get("pending_detail_blocked", 0),
     )
 
     results: list[dict] = []

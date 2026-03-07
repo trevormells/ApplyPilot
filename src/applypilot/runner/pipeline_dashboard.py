@@ -15,7 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from applypilot import config
-from applypilot.database import get_connection
+from applypilot.database import count_pending_detail, get_connection
 
 from .stage_logging import stage_log_path
 
@@ -56,9 +56,10 @@ class StageView:
 
 
 def _count_pending(stage: str, min_score: int) -> int:
+    if stage == "enrich":
+        return count_pending_detail()
     conn = get_connection()
     queries: dict[str, tuple[str, tuple[object, ...]]] = {
-        "enrich": ("SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL", ()),
         "score": ("SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL", ()),
         "tailor": (
             "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? "
@@ -151,6 +152,8 @@ class PipelineDashboard:
         validation_mode: str,
         pre_total_jobs: int,
         pre_pending_detail: int,
+        pre_pending_detail_blocked: int,
+        pre_pending_detail_blocked_sites: list[tuple[str, int]],
         terminal_console: Console,
     ):
         self._ordered = ordered
@@ -160,6 +163,8 @@ class PipelineDashboard:
         self._validation_mode = validation_mode
         self._pre_total_jobs = pre_total_jobs
         self._pre_pending_detail = pre_pending_detail
+        self._pre_pending_detail_blocked = pre_pending_detail_blocked
+        self._pre_pending_detail_blocked_sites = pre_pending_detail_blocked_sites
         self._terminal_console = terminal_console
         self._started_at = time.time()
         self._lock = threading.Lock()
@@ -257,7 +262,7 @@ class PipelineDashboard:
 
         layout = Layout()
         layout.split_column(
-            Layout(header, size=8),
+            Layout(header, size=9),
             Layout(stages, ratio=1),
             Layout(recent, size=9),
         )
@@ -278,7 +283,14 @@ class PipelineDashboard:
         )
         grid.add_row(
             f"[bold]Validation:[/bold] {self._validation_mode}",
-            f"[bold]DB:[/bold] {self._pre_total_jobs} jobs, {self._pre_pending_detail} pending enrichment",
+            f"[bold]DB:[/bold] {self._pre_total_jobs} jobs, {self._pre_pending_detail} actionable enrichment jobs",
+        )
+        blocked_sites = ", ".join(
+            f"{site}:{count}" for site, count in self._pre_pending_detail_blocked_sites
+        ) or "none"
+        grid.add_row(
+            f"[bold]Blocked:[/bold] {self._pre_pending_detail_blocked} skipped enrichment jobs",
+            f"[bold]Skipped sites:[/bold] {blocked_sites}",
         )
         grid.add_row(
             f"[bold]Stages:[/bold] {' -> '.join(self._ordered)}",

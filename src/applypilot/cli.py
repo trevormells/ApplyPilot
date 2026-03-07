@@ -306,7 +306,10 @@ def status() -> None:
 
     summary.add_row("Total jobs discovered", str(stats["total"]))
     summary.add_row("With full description", str(stats["with_description"]))
-    summary.add_row("Pending enrichment", str(stats["pending_detail"]))
+    summary.add_row("Pending enrichment (actionable)", str(stats["pending_detail"]))
+    summary.add_row("Skipped enrichment (blocked sites)", str(stats["pending_detail_blocked"]))
+    blocked_sites = ", ".join(f"{site}:{count}" for site, count in stats["pending_detail_blocked_sites"]) or "none"
+    summary.add_row("Skipped sites", blocked_sites)
     summary.add_row("Enrichment errors", str(stats["detail_errors"]))
     summary.add_row("Scored by LLM", str(stats["scored"]))
     summary.add_row("Pending scoring", str(stats["unscored"]))
