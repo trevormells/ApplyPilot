@@ -15,6 +15,7 @@ from rich.text import Text
 
 from applypilot import config
 from applypilot.database import count_pending_detail, get_connection
+from applypilot.llm_cost import LLMCostTracker
 
 from .stage_logging import stage_log_path
 
@@ -52,6 +53,9 @@ class StageView:
     finished_at: float | None = None
     summary: str = ""
     log_offset: int = 0
+    llm_cost_estimate: float = 0.0
+    llm_calls: int = 0
+    llm_unknown_cost_calls: int = 0
 
 
 def _count_pending(stage: str, min_score: int) -> int:
@@ -154,6 +158,7 @@ class PipelineDashboard:
         pre_pending_detail_blocked: int,
         pre_pending_detail_blocked_sites: list[tuple[str, int]],
         terminal_console: Console,
+        cost_tracker: LLMCostTracker,
     ):
         self._ordered = ordered
         self._mode = mode
@@ -165,6 +170,7 @@ class PipelineDashboard:
         self._pre_pending_detail_blocked = pre_pending_detail_blocked
         self._pre_pending_detail_blocked_sites = pre_pending_detail_blocked_sites
         self._terminal_console = terminal_console
+        self._cost_tracker = cost_tracker
         self._started_at = time.time()
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -201,6 +207,9 @@ class PipelineDashboard:
             stage.started_at = time.time()
             stage.finished_at = None
             stage.log_offset = log_offset
+            stage.llm_cost_estimate = 0.0
+            stage.llm_calls = 0
+            stage.llm_unknown_cost_calls = 0
             self._recent_stage = name
             self._recent_lines.clear()
 
@@ -225,7 +234,15 @@ class PipelineDashboard:
         self.refresh()
 
     def refresh(self) -> None:
+        cost_snapshot = self._cost_tracker.snapshot()
         with self._lock:
+            stage_costs = cost_snapshot["stage_costs"]
+            stage_calls = cost_snapshot["stage_calls"]
+            stage_unknown_cost_calls = cost_snapshot["stage_unknown_cost_calls"]
+            for name, stage in self._stages.items():
+                stage.llm_cost_estimate = float(stage_costs.get(name, 0.0))
+                stage.llm_calls = int(stage_calls.get(name, 0))
+                stage.llm_unknown_cost_calls = int(stage_unknown_cost_calls.get(name, 0))
             active = [stage for stage in self._stages.values() if stage.status == "active"]
             focus = max(active, key=lambda stage: stage.started_at or 0, default=None)
             if focus is None:
@@ -245,12 +262,16 @@ class PipelineDashboard:
             self.refresh()
 
     def __rich__(self):
+        cost_snapshot = self._cost_tracker.snapshot()
         with self._lock:
             snapshot = {
                 "stages": [self._stages[name] for name in self._ordered],
                 "recent_stage": self._recent_stage,
                 "recent_lines": list(self._recent_lines),
                 "started_at": self._started_at,
+                "llm_cost_estimate": float(cost_snapshot["total_cost"]),
+                "llm_calls": int(cost_snapshot["total_calls"]),
+                "llm_unknown_cost_calls": int(cost_snapshot["unknown_cost_calls"]),
             }
         return self._render(snapshot)
 
@@ -288,6 +309,13 @@ class PipelineDashboard:
             f"[bold]Stages:[/bold] {' -> '.join(self._ordered)}",
             f"[bold]Completed:[/bold] {sum(1 for stage in snapshot['stages'] if stage.status in ('ok', 'partial', 'error', 'skipped'))}/{len(self._ordered)}",
         )
+        llm_estimate = f"${snapshot['llm_cost_estimate']:.3f}"
+        if snapshot["llm_unknown_cost_calls"]:
+            llm_estimate = f"{llm_estimate}*"
+        grid.add_row(
+            f"[bold]LLM est.:[/bold] {llm_estimate}",
+            f"[bold]LLM calls:[/bold] {snapshot['llm_calls']} ({snapshot['llm_unknown_cost_calls']} unpriced)",
+        )
         return Panel(grid, title="ApplyPilot Pipeline", border_style="blue")
 
     def _render_stage_table(self, stages: list[StageView]) -> Panel:
@@ -296,6 +324,7 @@ class PipelineDashboard:
         table.add_column("Status", width=10)
         table.add_column("Progress", width=18, justify="right")
         table.add_column("Time", width=8, justify="right")
+        table.add_column("LLM Cost", width=10, justify="right")
         table.add_column("Summary", overflow="fold")
 
         for stage in stages:
@@ -304,11 +333,17 @@ class PipelineDashboard:
             progress = f"{stage.processed}/{stage.total} {stage.unit}" if stage.total or stage.processed else f"0 {stage.unit}"
             elapsed = _format_elapsed(stage.started_at, stage.finished_at)
             summary = stage.summary or stage.desc
+            stage_cost = ""
+            if stage.llm_calls:
+                stage_cost = f"${stage.llm_cost_estimate:.3f}"
+                if stage.llm_unknown_cost_calls:
+                    stage_cost = f"{stage_cost}*"
             table.add_row(
                 stage.name,
                 Text(label, style=style),
                 progress,
                 elapsed,
+                stage_cost,
                 summary,
             )
 

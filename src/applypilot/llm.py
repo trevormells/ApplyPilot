@@ -18,11 +18,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
+import math
 import os
 from typing import Any, Literal, TypedDict, Unpack
 import warnings
 
 import litellm
+
+from applypilot.llm_cost import record_llm_cost_estimate
 
 # Suppress pydantic serialization warnings emitted by litellm internals when
 # provider responses have fewer fields than the full ModelResponse schema.
@@ -44,6 +47,35 @@ _DEFAULT_MODEL_BY_PROVIDER = {
     "anthropic": "anthropic/claude-haiku-4-5",
 }
 _DEFAULT_LOCAL_MODEL = "openai/local-model"
+
+_COST_HELPER_CALLS: tuple[tuple[str, tuple[dict[str, object], ...]], ...] = (
+    (
+        "response_cost",
+        (
+            {"completion_response": None},
+            {"response_object": None},
+            {"response": None},
+        ),
+    ),
+    (
+        "completion_cost",
+        (
+            {"completion_response": None},
+            {"completion_response": None, "model": None},
+            {"response_object": None},
+            {"response_object": None, "model": None},
+        ),
+    ),
+    (
+        "response_cost_calculator",
+        (
+            {"response_object": None},
+            {"response_object": None, "model": None},
+            {"response": None},
+            {"response": None, "model": None},
+        ),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +130,58 @@ def _configured_model(env: Mapping[str, str], model_tier: ModelTier) -> str:
     if model or model_tier == "default":
         return model
     return _env_get(env, "LLM_MODEL")
+
+
+def _normalize_cost(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(cost) or math.isinf(cost) or cost < 0:
+        return None
+    return cost
+
+
+def _estimate_response_cost(response: object, *, model: str) -> float | None:
+    """Best-effort LiteLLM response pricing using built-in helpers."""
+    errors: list[str] = []
+
+    for helper_name, call_variants in _COST_HELPER_CALLS:
+        helper = getattr(litellm, helper_name, None)
+        if helper is None:
+            continue
+
+        for variant in call_variants:
+            kwargs = dict(variant)
+            for key, value in list(kwargs.items()):
+                if value is None:
+                    kwargs[key] = response if "response" in key else model
+            try:
+                cost = _normalize_cost(helper(**kwargs))
+            except TypeError:
+                continue
+            except Exception as exc:  # pragma: no cover - helper internals vary by LiteLLM version.
+                errors.append(f"{helper_name}: {exc}")
+                break
+            if cost is not None:
+                return cost
+
+        for args in ((response,), (response, model)):
+            try:
+                cost = _normalize_cost(helper(*args))
+            except TypeError:
+                continue
+            except Exception as exc:  # pragma: no cover - helper internals vary by LiteLLM version.
+                errors.append(f"{helper_name}: {exc}")
+                break
+            if cost is not None:
+                return cost
+
+    if errors:
+        log.debug("LiteLLM cost estimate unavailable for %s: %s", model, "; ".join(errors))
+    return None
 
 
 def _infer_provider_and_source(env: Mapping[str, str]) -> tuple[str, str] | None:
@@ -216,6 +300,8 @@ class LLMClient:
                     api_base=self.config.api_base or None,
                     **extra,
                 )
+
+            record_llm_cost_estimate(_estimate_response_cost(response, model=self.model))
 
             choices = getattr(response, "choices", None)
             if not choices:

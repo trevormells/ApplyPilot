@@ -24,6 +24,7 @@ from rich.table import Table
 
 from applypilot.config import load_env, ensure_dirs
 from applypilot.database import count_pending_detail, get_connection, get_stats, init_db
+from applypilot.llm_cost import LLMCostTracker, clear_llm_cost_tracker, install_llm_cost_tracker, llm_cost_stage
 
 from .pipeline_dashboard import PipelineDashboard
 from .stage_logging import StageConsole, capture_stage_output
@@ -311,61 +312,62 @@ def _run_stage_streaming(
 
     upstream = _UPSTREAM[stage]
 
-    with capture_stage_output(stage, console):
-        console.log_only(f"\n{'=' * 70}")
-        console.log_only(f"  [bold]STAGE: {stage}[/bold] — {STAGE_META[stage]['desc']} (streaming)")
-        console.log_only(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
-        console.log_only(f"{'=' * 70}")
+    with llm_cost_stage(stage):
+        with capture_stage_output(stage, console):
+            console.log_only(f"\n{'=' * 70}")
+            console.log_only(f"  [bold]STAGE: {stage}[/bold] — {STAGE_META[stage]['desc']} (streaming)")
+            console.log_only(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
+            console.log_only(f"{'=' * 70}")
 
-        if stage == "discover":
-            # Discover runs once (its sub-scrapers already do their full crawl)
-            try:
-                if dashboard is not None:
-                    dashboard.start_stage(stage)
-                    kwargs["dashboard"] = dashboard
-                result = runner(**kwargs)
-                tracker.mark_done(stage, result)
-            except Exception as e:
-                log.exception("Stage '%s' crashed", stage)
-                tracker.mark_done(stage, {"status": f"error: {e}"})
-                console.log_only(f"\n  [red]STAGE FAILED:[/red] {e}")
-                if dashboard is not None:
-                    dashboard.finish_stage(stage, "error", summary=str(e))
-            else:
-                console.log_only(f"\n  Stage '{stage}' completed — ok")
-                if dashboard is not None:
-                    dashboard.finish_stage(stage, "ok", summary="Discovery complete")
-            return
-
-        # For downstream stages: loop until upstream done + no pending work
-        passes = 0
-        if dashboard is not None:
-            dashboard.start_stage(stage)
-        while not stop_event.is_set():
-            # Wait a bit for upstream to produce some work before first run
-            if passes == 0 and upstream and not tracker.is_done(upstream):
-                tracker.wait(upstream, timeout=_STREAM_POLL_INTERVAL)
-
-            pending = _count_pending(stage, min_score)
-
-            if pending > 0:
+            if stage == "discover":
+                # Discover runs once (its sub-scrapers already do their full crawl)
                 try:
-                    runner(**kwargs)
-                    passes += 1
+                    if dashboard is not None:
+                        dashboard.start_stage(stage)
+                        kwargs["dashboard"] = dashboard
+                    result = runner(**kwargs)
+                    tracker.mark_done(stage, result)
                 except Exception as e:
-                    log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
-                    passes += 1
-            else:
-                upstream_done = upstream is None or tracker.is_done(upstream)
-                if upstream_done:
-                    break
-                if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
-                    break
+                    log.exception("Stage '%s' crashed", stage)
+                    tracker.mark_done(stage, {"status": f"error: {e}"})
+                    console.log_only(f"\n  [red]STAGE FAILED:[/red] {e}")
+                    if dashboard is not None:
+                        dashboard.finish_stage(stage, "error", summary=str(e))
+                else:
+                    console.log_only(f"\n  Stage '{stage}' completed — ok")
+                    if dashboard is not None:
+                        dashboard.finish_stage(stage, "ok", summary="Discovery complete")
+                return
 
-        tracker.mark_done(stage, {"status": "ok", "passes": passes})
-        console.log_only(f"\n  Stage '{stage}' completed after {passes} pass(es)")
-        if dashboard is not None:
-            dashboard.finish_stage(stage, "ok", summary=f"{passes} pass(es)")
+            # For downstream stages: loop until upstream done + no pending work
+            passes = 0
+            if dashboard is not None:
+                dashboard.start_stage(stage)
+            while not stop_event.is_set():
+                # Wait a bit for upstream to produce some work before first run
+                if passes == 0 and upstream and not tracker.is_done(upstream):
+                    tracker.wait(upstream, timeout=_STREAM_POLL_INTERVAL)
+
+                pending = _count_pending(stage, min_score)
+
+                if pending > 0:
+                    try:
+                        runner(**kwargs)
+                        passes += 1
+                    except Exception as e:
+                        log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
+                        passes += 1
+                else:
+                    upstream_done = upstream is None or tracker.is_done(upstream)
+                    if upstream_done:
+                        break
+                    if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
+                        break
+
+            tracker.mark_done(stage, {"status": "ok", "passes": passes})
+            console.log_only(f"\n  Stage '{stage}' completed after {passes} pass(es)")
+            if dashboard is not None:
+                dashboard.finish_stage(stage, "ok", summary=f"{passes} pass(es)")
 
 
 # ---------------------------------------------------------------------------
@@ -388,52 +390,57 @@ def _run_sequential(
     for name in ordered:
         if dashboard is not None:
             dashboard.start_stage(name)
-        with capture_stage_output(name, console):
-            meta = STAGE_META[name]
-            console.log_only(f"\n{'=' * 70}")
-            console.log_only(f"  [bold]STAGE: {name}[/bold] — {meta['desc']}")
-            console.log_only(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
-            console.log_only(f"{'=' * 70}")
+        with llm_cost_stage(name):
+            with capture_stage_output(name, console):
+                meta = STAGE_META[name]
+                console.log_only(f"\n{'=' * 70}")
+                console.log_only(f"  [bold]STAGE: {name}[/bold] — {meta['desc']}")
+                console.log_only(f"  Started: {datetime.now().strftime('%H:%M:%S')}")
+                console.log_only(f"{'=' * 70}")
 
-            t0 = time.time()
-            runner = _STAGE_RUNNERS[name]
+                t0 = time.time()
+                runner = _STAGE_RUNNERS[name]
 
-            try:
-                kwargs: dict = {}
-                if name in ("tailor", "cover"):
-                    kwargs["min_score"] = min_score
-                    kwargs["validation_mode"] = validation_mode
-                if name in ("discover", "enrich"):
-                    kwargs["workers"] = workers
-                if dashboard is not None and name == "discover":
-                    kwargs["dashboard"] = dashboard
-                result = runner(**kwargs)
-                elapsed = time.time() - t0
+                try:
+                    kwargs: dict = {}
+                    if name in ("tailor", "cover"):
+                        kwargs["min_score"] = min_score
+                        kwargs["validation_mode"] = validation_mode
+                    if name in ("discover", "enrich"):
+                        kwargs["workers"] = workers
+                    if dashboard is not None and name == "discover":
+                        kwargs["dashboard"] = dashboard
+                    result = runner(**kwargs)
+                    elapsed = time.time() - t0
 
-                status = "ok"
-                if isinstance(result, dict):
-                    status = result.get("status", "ok")
-                    if name == "discover":
-                        sub_errors = [
-                            f"{k}: {v}" for k, v in result.items() if isinstance(v, str) and v.startswith("error")
-                        ]
-                        if sub_errors:
-                            status = "partial"
+                    status = "ok"
+                    if isinstance(result, dict):
+                        status = result.get("status", "ok")
+                        if name == "discover":
+                            sub_errors = [
+                                f"{k}: {v}" for k, v in result.items() if isinstance(v, str) and v.startswith("error")
+                            ]
+                            if sub_errors:
+                                status = "partial"
 
-            except Exception as e:
-                elapsed = time.time() - t0
-                status = f"error: {e}"
-                log.exception("Stage '%s' crashed", name)
-                console.log_only(f"\n  [red]STAGE FAILED:[/red] {e}")
+                except Exception as e:
+                    elapsed = time.time() - t0
+                    status = f"error: {e}"
+                    log.exception("Stage '%s' crashed", name)
+                    console.log_only(f"\n  [red]STAGE FAILED:[/red] {e}")
 
-            results.append({"stage": name, "status": status, "elapsed": elapsed})
-            if status not in ("ok", "partial"):
-                errors[name] = status
+                results.append({"stage": name, "status": status, "elapsed": elapsed})
+                if status not in ("ok", "partial"):
+                    errors[name] = status
 
-            console.log_only(f"\n  Stage '{name}' completed in {elapsed:.1f}s — {status}")
-            if dashboard is not None:
-                summary = meta["desc"] if status == "ok" else status
-                dashboard.finish_stage(name, status if status in ("ok", "partial", "error") else "error", summary=summary)
+                console.log_only(f"\n  Stage '{name}' completed in {elapsed:.1f}s — {status}")
+                if dashboard is not None:
+                    summary = meta["desc"] if status == "ok" else status
+                    dashboard.finish_stage(
+                        name,
+                        status if status in ("ok", "partial", "error") else "error",
+                        summary=summary,
+                    )
 
     total_elapsed = time.time() - pipeline_start
     return {"stages": results, "errors": errors, "elapsed": total_elapsed}
@@ -563,60 +570,74 @@ def run_pipeline(
         console.print("\n  No changes made.")
         return {"stages": [], "errors": {}, "elapsed": 0.0}
 
+    cost_tracker = LLMCostTracker(stages=ordered)
+    install_llm_cost_tracker(cost_tracker)
+
     use_dashboard = bool(console.is_terminal)
-    if use_dashboard:
-        dashboard = PipelineDashboard(
-            ordered,
-            STAGE_META,
-            mode=mode,
-            min_score=min_score,
-            workers=workers,
-            validation_mode=validation_mode,
-            pre_total_jobs=pre_stats["total"],
-            pre_pending_detail=pre_stats["pending_detail"],
-            pre_pending_detail_blocked=pre_stats["pending_detail_blocked"],
-            pre_pending_detail_blocked_sites=pre_stats["pending_detail_blocked_sites"],
-            terminal_console=console,
-        )
-        dashboard.start()
-        try:
-            with Live(dashboard, console=console.terminal_console, refresh_per_second=4, transient=False):
-                if stream:
-                    result = _run_streaming(
-                        ordered,
-                        min_score,
-                        workers=workers,
-                        validation_mode=validation_mode,
-                        dashboard=dashboard,
-                    )
-                else:
-                    result = _run_sequential(
-                        ordered,
-                        min_score,
-                        workers=workers,
-                        validation_mode=validation_mode,
-                        dashboard=dashboard,
-                    )
-        finally:
-            dashboard.stop()
-            console.print()
-    else:
-        console.print()
-        console.print(
-            Panel.fit(
-                f"[bold]ApplyPilot Pipeline[/bold] ({mode})",
-                border_style="blue",
+    try:
+        if use_dashboard:
+            dashboard = PipelineDashboard(
+                ordered,
+                STAGE_META,
+                mode=mode,
+                min_score=min_score,
+                workers=workers,
+                validation_mode=validation_mode,
+                pre_total_jobs=pre_stats["total"],
+                pre_pending_detail=pre_stats["pending_detail"],
+                pre_pending_detail_blocked=pre_stats["pending_detail_blocked"],
+                pre_pending_detail_blocked_sites=pre_stats["pending_detail_blocked_sites"],
+                terminal_console=console,
+                cost_tracker=cost_tracker,
             )
-        )
-        console.print(f"  Min score:  {min_score}")
-        console.print(f"  Workers:    {workers}")
-        console.print(f"  Validation: {validation_mode}")
-        console.print(f"  Stages:     {' -> '.join(ordered)}")
-        console.print(f"  DB:        {pre_stats['total']} jobs, {_format_pending_detail_summary(pre_stats)}")
-        if stream:
-            result = _run_streaming(ordered, min_score, workers=workers, validation_mode=validation_mode)
+            dashboard.start()
+            try:
+                with Live(dashboard, console=console.terminal_console, refresh_per_second=4, transient=False):
+                    if stream:
+                        result = _run_streaming(
+                            ordered,
+                            min_score,
+                            workers=workers,
+                            validation_mode=validation_mode,
+                            dashboard=dashboard,
+                        )
+                    else:
+                        result = _run_sequential(
+                            ordered,
+                            min_score,
+                            workers=workers,
+                            validation_mode=validation_mode,
+                            dashboard=dashboard,
+                        )
+            finally:
+                dashboard.stop()
+                console.print()
         else:
-            result = _run_sequential(ordered, min_score, workers=workers, validation_mode=validation_mode)
+            console.print()
+            console.print(
+                Panel.fit(
+                    f"[bold]ApplyPilot Pipeline[/bold] ({mode})",
+                    border_style="blue",
+                )
+            )
+            console.print(f"  Min score:  {min_score}")
+            console.print(f"  Workers:    {workers}")
+            console.print(f"  Validation: {validation_mode}")
+            console.print(f"  Stages:     {' -> '.join(ordered)}")
+            console.print(f"  DB:        {pre_stats['total']} jobs, {_format_pending_detail_summary(pre_stats)}")
+            if stream:
+                result = _run_streaming(ordered, min_score, workers=workers, validation_mode=validation_mode)
+            else:
+                result = _run_sequential(ordered, min_score, workers=workers, validation_mode=validation_mode)
+
+        cost_snapshot = cost_tracker.snapshot()
+    finally:
+        clear_llm_cost_tracker(cost_tracker)
+
+    result["llm_cost_estimate"] = float(cost_snapshot["total_cost"])
+    result["llm_calls"] = int(cost_snapshot["total_calls"])
+    result["llm_cost_unknown_calls"] = int(cost_snapshot["unknown_cost_calls"])
+    result["llm_cost_by_stage"] = cost_snapshot["stage_costs"]
 
     # Summary table
     console.print(f"\n{'=' * 70}")
@@ -639,6 +660,11 @@ def run_pipeline(
     summary.add_row("", "", "")
     summary.add_row("[bold]Total[/bold]", "", f"[bold]{result['elapsed']:.1f}s[/bold]")
     console.print(summary)
+    llm_summary = f"  [bold]Estimated LLM cost:[/bold] ${result['llm_cost_estimate']:.3f}"
+    if result["llm_cost_unknown_calls"]:
+        llm_summary += f" ({result['llm_cost_unknown_calls']} unpriced call(s))"
+    llm_summary += f" across {result['llm_calls']} call(s)"
+    console.print(llm_summary)
 
     # Final DB stats
     final = get_stats()
