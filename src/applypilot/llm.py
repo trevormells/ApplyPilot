@@ -279,7 +279,6 @@ class LLMClient:
                 response = litellm.completion(
                     model=self.model,
                     messages=messages,
-                    max_tokens=max_output_tokens,
                     timeout=timeout,
                     num_retries=num_retries,
                     drop_params=drop_params,
@@ -291,7 +290,6 @@ class LLMClient:
                 response = litellm.completion(
                     model=self.model,
                     messages=messages,
-                    max_tokens=max_output_tokens,
                     temperature=temperature,
                     timeout=timeout,
                     num_retries=num_retries,
@@ -399,7 +397,6 @@ def validate_api_key(provider: str, api_key: str, model: str = "", endpoint: str
         response = litellm.completion(
             model=config.model,
             messages=[{"role": "user", "content": "Reply with only the word 'ok'."}],
-            max_tokens=10,
             temperature=0.0,
             timeout=30,
             num_retries=0,

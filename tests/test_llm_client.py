@@ -52,12 +52,12 @@ def test_chat_passes_defaults_without_temperature(monkeypatch) -> None:
 
     assert response == "hello"
     assert captured["model"] == "openai/gpt-4o-mini"
-    assert captured["max_tokens"] == 128
     assert captured["timeout"] == 120
     assert captured["num_retries"] == 5
     assert captured["drop_params"] is True
     assert captured["api_key"] == "test-key"
     assert captured["api_base"] is None
+    assert "max_tokens" not in captured
     assert "temperature" not in captured
     assert "reasoning_effort" not in captured
 
