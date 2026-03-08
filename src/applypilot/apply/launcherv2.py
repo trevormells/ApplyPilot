@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import os
 import platform
 import re
 import signal
@@ -59,6 +60,7 @@ from applypilot.apply.browser_use_logs import (
     save_browser_use_history,
 )
 from applypilot.apply import db as launcherv2_db
+from applypilot.llm import resolve_llm_config
 
 logger = logging.getLogger(__name__)
 logging.getLogger("browser_use").setLevel(logging.WARNING)
@@ -92,7 +94,7 @@ if platform.system() != "Windows":
 
 
 def gen_prompt(
-    target_url: str, min_score: int = 7, model: str = "gemini-3-flash-preview", worker_id: int = 0
+    target_url: str, min_score: int = 7, model: str | None = None, worker_id: int = 0
 ) -> Path | None:
     """Generate a prompt file for manual debugging.
 
@@ -122,6 +124,14 @@ def gen_prompt(
     prompt_file.write_text(prompt, encoding="utf-8")
 
     return prompt_file
+
+
+def resolve_apply_model(model: str | None = None) -> str:
+    """Resolve the browser-use model from the explicit override or current env."""
+    env = dict(os.environ)
+    if model and model.strip():
+        env["LLM_MODEL"] = model.strip()
+    return resolve_llm_config(env).model
 
 
 # ---------------------------------------------------------------------------
@@ -175,17 +185,34 @@ async def _close_browser(browser) -> None:
 
 def _build_llm(model: str) -> object:
     """Construct a deterministic browser-use LLM class from model name."""
-    normalized_model = model.strip().lower()
-    if "gemini" in normalized_model or "gemma" in normalized_model:
-        return ChatGoogle(model=model)
+    raw_model = model.strip()
+    provider, _, provider_model = raw_model.partition("/")
+    normalized_provider = provider.lower()
+    base_model = provider_model if provider_model else raw_model
+    normalized_model = raw_model.lower()
+    normalized_base_model = base_model.lower()
+
+    if normalized_provider in ("gemini", "google"):
+        return ChatGoogle(model=base_model)
+
+    if normalized_provider == "anthropic":
+        return ChatAnthropic(model=base_model)
+
+    if normalized_provider == "openai":
+        return ChatOpenAI(model=base_model)
+
+    if "gemini" in normalized_model or "gemma" in normalized_base_model:
+        return ChatGoogle(model=raw_model)
 
     if "claude" in normalized_model or normalized_model.startswith("anthropic/"):
-        return ChatAnthropic(model=model)
+        return ChatAnthropic(model=raw_model)
 
-    if "gpt" in normalized_model or normalized_model.startswith(("o1", "o3", "o4", "codex", "chatgpt")):
-        return ChatOpenAI(model=model)
+    if normalized_model.startswith("openai/") or "gpt" in normalized_base_model or normalized_base_model.startswith(
+        ("o1", "o3", "o4", "codex", "chatgpt")
+    ):
+        return ChatOpenAI(model=base_model if provider_model else raw_model)
 
-    raise ValueError(f"Unsupported model: {model}")
+    raise ValueError(f"Unsupported model: {raw_model}")
 
 
 def _format_last_action(agent_out: AgentOutput) -> str:
@@ -291,7 +318,7 @@ def run_job(
     job: dict,
     port: int,
     worker_id: int = 0,
-    model: str = "gemini-3-flash-preview",
+    model: str | None = None,
     dry_run: bool = False,
     headless: bool = False,
 ) -> tuple[str, int]:
@@ -303,6 +330,7 @@ def run_job(
         'failed:reason', or 'skipped'.
     """
     resume_path = job.get("tailored_resume_path")
+    resolved_model = resolve_apply_model(model)
     txt_path = Path(resume_path).with_suffix(".txt") if resume_path else None
     resume_text = ""
     if txt_path and txt_path.exists():
@@ -355,7 +383,7 @@ def run_job(
                 worker_id=worker_id,
                 port=port,
                 headless=headless,
-                model=model,
+                model=resolved_model,
                 cancel_event=cancel_event,
                 cost_baseline=cost_baseline,
                 log_stem=browser_log_stem,
@@ -481,7 +509,7 @@ def worker_loop(
     target_url: str | None = None,
     min_score: int = 7,
     headless: bool = False,
-    model: str = "gemini-3-flash-preview",
+    model: str | None = None,
     dry_run: bool = False,
 ) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
@@ -593,7 +621,7 @@ def main(
     target_url: str | None = None,
     min_score: int = 7,
     headless: bool = False,
-    model: str = "gemini-3-flash-preview",
+    model: str | None = None,
     dry_run: bool = False,
     continuous: bool = False,
     poll_interval: int = 60,
@@ -617,6 +645,7 @@ def main(
     _stop_event.clear()
 
     config.ensure_dirs()
+    model = resolve_apply_model(model)
     console = Console()
 
     if continuous:

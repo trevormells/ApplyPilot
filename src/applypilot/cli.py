@@ -182,7 +182,7 @@ def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    model: str = typer.Option("gemini-3-flash-preview", "--model", "-m", help="browser-use model hint."),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="browser-use model hint (defaults to LLM_MODEL from .env)."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
@@ -248,13 +248,14 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcherv2 import gen_prompt
+        from applypilot.apply.launcherv2 import gen_prompt, resolve_apply_model
 
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
             raise typer.Exit(code=1)
-        prompt_file = gen_prompt(target, min_score=min_score, model=model)
+        resolved_model = resolve_apply_model(model)
+        prompt_file = gen_prompt(target, min_score=min_score, model=resolved_model)
         if not prompt_file:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
@@ -262,14 +263,15 @@ def apply(
         console.print("[dim]Prompt generation only. Launcher v2 no longer emits Claude MCP command output.[/dim]")
         return
 
-    from applypilot.apply.launcherv2 import main as apply_main
+    from applypilot.apply.launcherv2 import main as apply_main, resolve_apply_model
 
     effective_limit = limit if limit is not None else (0 if continuous else 1)
+    resolved_model = resolve_apply_model(model)
 
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
     console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
     console.print(f"  Workers:  {workers}")
-    console.print(f"  Model:    {model}")
+    console.print(f"  Model:    {resolved_model}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
     if url:
@@ -281,7 +283,7 @@ def apply(
         target_url=url,
         min_score=min_score,
         headless=headless,
-        model=model,
+        model=resolved_model,
         dry_run=dry_run,
         continuous=continuous,
         workers=workers,
