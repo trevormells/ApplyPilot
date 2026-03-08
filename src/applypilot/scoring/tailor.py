@@ -498,8 +498,8 @@ def run_tailoring(min_score: int = 7, limit: int = 20, validation_mode: str = "n
     log.info("Tailoring resumes for %d jobs (score >= %d)...", len(jobs), min_score)
     t0 = time.time()
     completed = 0
-    results: list[dict] = []
     stats: dict[str, int] = {"approved": 0, "failed_validation": 0, "failed_judge": 0, "error": 0}
+    _success_statuses = {"approved", "approved_with_judge_warning"}
 
     for job in jobs:
         completed += 1
@@ -563,7 +563,24 @@ def run_tailoring(min_score: int = 7, limit: int = 20, validation_mode: str = "n
             }
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
-        results.append(result)
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            if result["status"] in _success_statuses:
+                conn.execute(
+                    "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+                    "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                    (result["path"], now, result["url"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                    (result["url"],),
+                )
+            conn.commit()
+        except Exception as e:
+            result["status"] = "error"
+            log.error("Failed to persist tailoring result for %s -- %s", job["title"][:40], e)
+
         stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
 
         elapsed = time.time() - t0
@@ -577,23 +594,6 @@ def run_tailoring(min_score: int = 7, limit: int = 20, validation_mode: str = "n
             rate * 60,
             result["title"][:40],
         )
-
-    # Persist to DB: increment attempt counter for ALL, save path only for approved
-    now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
-    for r in results:
-        if r["status"] in _success_statuses:
-            conn.execute(
-                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-        else:
-            conn.execute(
-                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
 
     elapsed = time.time() - t0
     log.info(
