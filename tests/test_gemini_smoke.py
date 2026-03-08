@@ -37,7 +37,6 @@ def test_gemini_smoke_completion_returns_non_empty_content() -> None:
         model=_gemini_smoke_model(),
         api_key=api_key,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=32,
         timeout=60,
         num_retries=1,
     )
