@@ -223,10 +223,22 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     preserved_companies = resume_facts.get("preserved_companies", [])
 
     if isinstance(data["experience"], list):
+        experience_entries: list[str] = []
+        for entry in data["experience"]:
+            entry_text = " ".join(
+                [
+                    str(entry.get("header", "")),
+                    str(entry.get("subtitle", "")),
+                    " ".join(str(b) for b in entry.get("bullets", [])),
+                ]
+            ).lower()
+            experience_entries.append(entry_text)
+
         for company in preserved_companies:
-            has_company = any(company.lower() in str(e.get("header", "")).lower() for e in data["experience"])
+            has_company = any(company.lower() in entry_text for entry_text in experience_entries)
             if not has_company:
                 errors.append(f"Company '{company}' missing from experience")
+
         for entry in data["experience"]:
             for b in entry.get("bullets", []):
                 all_text_parts.append(b)

@@ -104,7 +104,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 ## HARD RULES:
 - Do NOT invent work, companies, degrees, or certifications
 - Do NOT change real numbers ({metrics_str})
-- Preserved companies: {companies_str} -- names stay as-is
+- Preserved companies: {companies_str} -- every one of these must appear somewhere in the experience entries, and names stay as-is
 - Preserved school: {school}
 - Must fit 1 page.
 
