@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 import threading
 from typing import Iterator
 
@@ -86,6 +86,16 @@ def record_llm_cost_estimate(cost: float | None) -> None:
     if tracker is None:
         return
     tracker.record(cost)
+
+
+def bind_current_llm_cost_context(fn):
+    """Wrap a callable so it runs inside the current ContextVar state."""
+    ctx = copy_context()
+
+    def _wrapped(*args, **kwargs):
+        return ctx.run(fn, *args, **kwargs)
+
+    return _wrapped
 
 
 @contextmanager

@@ -8,11 +8,13 @@ profile and resume file.
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from applypilot.config import RESUME_PATH
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
+from applypilot.llm_cost import bind_current_llm_cost_context
 
 log = logging.getLogger(__name__)
 
@@ -142,12 +144,87 @@ def score_job(resume_text: str, job: dict) -> dict:
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}"}
 
 
-def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
+def _score_single_job(resume_text: str, job: dict) -> dict:
+    """Score one job, persist the result, and return logging metadata."""
+    started = time.perf_counter()
+    title = _job_value(job, "title", "?")[:60]
+    url = _job_value(job, "url", "")
+    error_count = 0
+
+    try:
+        llm_started = time.perf_counter()
+        result = _normalize_score_result(score_job(resume_text, job))
+        llm_elapsed = time.perf_counter() - llm_started
+    except Exception as exc:
+        error_count += 1
+        result = {
+            "score": 0,
+            "keywords": "",
+            "reasoning": f"Scoring error: {exc}",
+        }
+        llm_elapsed = time.perf_counter() - started
+        log.exception("scoring failed  %s", title)
+
+    result["url"] = url
+
+    if result["score"] == 0:
+        error_count += 1
+
+    persisted = False
+    if not url:
+        error_count += 1
+        log.error("score=%d  %s | missing job url; skipping DB update", result["score"], title)
+    else:
+        try:
+            conn = get_connection()
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
+                (result["score"], f"{result['keywords']}\n{result['reasoning']}", now, result["url"]),
+            )
+            conn.commit()
+            persisted = True
+        except Exception:
+            error_count += 1
+            log.exception("Failed to persist score for %s", result.get("url", "?"))
+
+    total_elapsed = time.perf_counter() - started
+    return {
+        "title": title,
+        "url": url,
+        "score": result["score"],
+        "reasoning": result.get("reasoning", ""),
+        "errors": error_count,
+        "persisted": persisted,
+        "llm_seconds": llm_elapsed,
+        "elapsed_seconds": total_elapsed,
+    }
+
+
+def _log_score_completion(completed: int, total: int, result: dict, started_at: float) -> None:
+    """Emit a per-job scoring log line with timing details."""
+    elapsed = time.time() - started_at
+    rate = completed / elapsed if elapsed > 0 else 0
+    log.info(
+        "[%d/%d] score=%d | llm=%.1fs total=%.1fs | %.1f jobs/min | %s | %s",
+        completed,
+        total,
+        result["score"],
+        float(result.get("llm_seconds", 0.0) or 0.0),
+        float(result.get("elapsed_seconds", 0.0) or 0.0),
+        rate * 60,
+        result["title"],
+        _log_reasoning_snippet(result.get("reasoning", "")),
+    )
+
+
+def run_scoring(limit: int = 0, rescore: bool = False, workers: int = 1) -> dict:
     """Score unscored jobs that have full descriptions.
 
     Args:
         limit: Maximum number of jobs to score in this run.
         rescore: If True, re-score all jobs (not just unscored ones).
+        workers: Number of jobs to score concurrently.
 
     Returns:
         {"scored": int, "errors": int, "elapsed": float, "distribution": list}
@@ -172,61 +249,49 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         columns = jobs[0].keys()
         jobs = [dict(zip(columns, row)) for row in jobs]
 
-    log.info("Scoring %d jobs sequentially...", len(jobs))
+    workers = max(1, workers)
+    log.info("Scoring %d jobs (workers=%d)...", len(jobs), min(workers, len(jobs)))
     t0 = time.time()
     completed = 0
     errors = 0
     persisted = 0
 
-    for job in jobs:
-        completed += 1
-        title = _job_value(job, "title", "?")[:60]
-        url = _job_value(job, "url", "")
-
-        try:
-            result = _normalize_score_result(score_job(resume_text, job))
-        except Exception as e:
-            errors += 1
-            fallback = {
-                "score": 0,
-                "keywords": "",
-                "reasoning": f"Scoring error: {e}",
-                "url": url,
+    if workers == 1 or len(jobs) == 1:
+        results = (_score_single_job(resume_text, job) for job in jobs)
+        for result in results:
+            completed += 1
+            errors += int(result.get("errors", 0) or 0)
+            if result.get("persisted"):
+                persisted += 1
+            _log_score_completion(completed, len(jobs), result, t0)
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, len(jobs)), thread_name_prefix="score-worker") as pool:
+            future_to_job = {
+                pool.submit(bind_current_llm_cost_context(_score_single_job), resume_text, job): job for job in jobs
             }
-            result = fallback
-            log.exception("[%d/%d] scoring failed  %s", completed, len(jobs), title)
+            for future in as_completed(future_to_job):
+                job = future_to_job[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    title = _job_value(job, "title", "?")[:60]
+                    log.exception("Scoring crashed for %s", title)
+                    result = {
+                        "title": title,
+                        "url": _job_value(job, "url", ""),
+                        "score": 0,
+                        "reasoning": f"Scoring error: {exc}",
+                        "errors": 1,
+                        "persisted": False,
+                        "llm_seconds": 0.0,
+                        "elapsed_seconds": 0.0,
+                    }
 
-        result["url"] = url
-
-        if result["score"] == 0:
-            errors += 1
-
-        if not url:
-            errors += 1
-            log.error("[%d/%d] score=%d  %s | missing job url; skipping DB update", completed, len(jobs), result["score"], title)
-            continue
-
-        try:
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
-                (result["score"], f"{result['keywords']}\n{result['reasoning']}", now, result["url"]),
-            )
-            conn.commit()
-            persisted += 1
-        except Exception:
-            errors += 1
-            log.exception("Failed to persist score for %s", result.get("url", "?"))
-            continue
-
-        log.info(
-            "[%d/%d] score=%d  %s | %s",
-            completed,
-            len(jobs),
-            result["score"],
-            title,
-            _log_reasoning_snippet(result.get("reasoning", "")),
-        )
+                completed += 1
+                errors += int(result.get("errors", 0) or 0)
+                if result.get("persisted"):
+                    persisted += 1
+                _log_score_completion(completed, len(jobs), result, t0)
 
     elapsed = time.time() - t0
     log.info(

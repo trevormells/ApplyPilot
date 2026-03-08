@@ -323,7 +323,7 @@ class LLMClient:
         self,
         prompt: str,
         *,
-        max_tokens: int = 10000,
+        max_tokens: int = None, #: 10000,
         temperature: float | None = None,
         **extra: Unpack[LiteLLMExtra],
     ) -> str:

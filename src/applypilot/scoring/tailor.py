@@ -13,12 +13,14 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
+from applypilot.llm_cost import bind_current_llm_cost_context
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     sanitize_text,
@@ -28,6 +30,7 @@ from applypilot.scoring.validator import (
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
+_SUCCESS_STATUSES = {"approved", "approved_with_judge_warning"}
 
 
 # ── Prompt Builders (profile-driven) ──────────────────────────────────────
@@ -387,6 +390,11 @@ def tailor_resume(
         "judge": None,
         "status": "pending",
         "validation_mode": validation_mode,
+        "timings": {
+            "generation_seconds": 0.0,
+            "judge_seconds": 0.0,
+            "attempts": [],
+        },
     }
     avoid_notes: list[str] = []
     tailored = ""
@@ -395,6 +403,12 @@ def tailor_resume(
 
     for attempt in range(max_retries + 1):
         report["attempts"] = attempt + 1
+        attempt_timing = {
+            "attempt": attempt + 1,
+            "generation_seconds": 0.0,
+            "judge_seconds": 0.0,
+            "outcome": "pending",
+        }
 
         # Fresh conversation every attempt
         prompt = tailor_prompt_base
@@ -411,7 +425,11 @@ def tailor_resume(
             },
         ]
 
+        generation_started = time.perf_counter()
         raw = client.chat(messages, max_output_tokens=16000)
+        generation_elapsed = time.perf_counter() - generation_started
+        attempt_timing["generation_seconds"] = generation_elapsed
+        report["timings"]["generation_seconds"] += generation_elapsed
 
         # Parse JSON from response
         try:
@@ -424,6 +442,8 @@ def tailor_resume(
                 raw[:1000],
             )
             avoid_notes.append("Output was not valid JSON. Return ONLY a JSON object, nothing else.")
+            attempt_timing["outcome"] = "json_parse_failed"
+            report["timings"]["attempts"].append(attempt_timing)
             continue
 
         # Layer 1: Validate JSON fields
@@ -434,6 +454,8 @@ def tailor_resume(
             # Only retry if there are hard errors (warnings never block)
             log.warning("Attempt %d validation failed: %s", attempt + 1, validation["errors"])
             avoid_notes.extend(validation["errors"])
+            attempt_timing["outcome"] = "failed_validation"
+            report["timings"]["attempts"].append(attempt_timing)
             if attempt < max_retries:
                 continue
             # Last attempt — assemble whatever we got
@@ -448,39 +470,168 @@ def tailor_resume(
         if validation_mode == "lenient":
             report["judge"] = {"verdict": "SKIPPED", "passed": True, "issues": "none"}
             report["status"] = "approved"
+            attempt_timing["outcome"] = "approved"
+            report["timings"]["attempts"].append(attempt_timing)
             return tailored, report
 
+        judge_started = time.perf_counter()
         judge = judge_tailored_resume(resume_text, tailored, job.get("title", ""), profile)
+        judge_elapsed = time.perf_counter() - judge_started
+        attempt_timing["judge_seconds"] = judge_elapsed
+        report["timings"]["judge_seconds"] += judge_elapsed
         report["judge"] = judge
 
         if not judge["passed"]:
             avoid_notes.append(f"Judge rejected: {judge['issues']}")
             if attempt < max_retries:
                 # In normal mode, only retry on judge failure if there are retries left
+                attempt_timing["outcome"] = "failed_judge"
+                report["timings"]["attempts"].append(attempt_timing)
                 if validation_mode != "lenient":
                     continue
             # Accept best attempt on last retry (all modes) or if lenient
             report["status"] = "approved_with_judge_warning"
+            attempt_timing["outcome"] = "approved_with_judge_warning"
+            report["timings"]["attempts"].append(attempt_timing)
             return tailored, report
 
         # Both passed
         report["status"] = "approved"
+        attempt_timing["outcome"] = "approved"
+        report["timings"]["attempts"].append(attempt_timing)
         return tailored, report
 
     report["status"] = "exhausted_retries"
     return tailored, report
 
 
+def _tailor_filename_prefix(job: dict) -> str:
+    """Build a stable artifact filename prefix for a tailored job."""
+    safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
+    safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
+    return f"{safe_site}_{safe_title}"
+
+
+def _process_tailor_job(resume_text: str, job: dict, profile: dict, validation_mode: str) -> dict:
+    """Tailor one job, persist artifacts, and update DB state."""
+    started = time.perf_counter()
+
+    try:
+        tailored, report = tailor_resume(resume_text, job, profile, validation_mode=validation_mode)
+        prefix = _tailor_filename_prefix(job)
+
+        txt_path = TAILORED_DIR / f"{prefix}.txt"
+        txt_path.write_text(tailored, encoding="utf-8")
+
+        job_path = TAILORED_DIR / f"{prefix}_JOB.txt"
+        job_desc = (
+            f"Title: {job['title']}\n"
+            f"Company: {job['site']}\n"
+            f"Location: {job.get('location', 'N/A')}\n"
+            f"Score: {job.get('fit_score', 'N/A')}\n"
+            f"URL: {job['url']}\n\n"
+            f"{job.get('full_description', '')}"
+        )
+        job_path.write_text(job_desc, encoding="utf-8")
+
+        report_path = TAILORED_DIR / f"{prefix}_REPORT.json"
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+        pdf_path = None
+        if report["status"] in _SUCCESS_STATUSES:
+            try:
+                from applypilot.scoring.pdf import convert_to_pdf
+
+                pdf_path = str(convert_to_pdf(txt_path))
+            except Exception:
+                log.debug("PDF generation failed for %s", txt_path, exc_info=True)
+
+        result = {
+            "url": job["url"],
+            "path": str(txt_path),
+            "pdf_path": pdf_path,
+            "title": job["title"],
+            "site": job["site"],
+            "status": report["status"],
+            "attempts": report["attempts"],
+            "timings": report.get("timings", {}),
+        }
+    except Exception as exc:
+        log.error("Tailoring failed for %s -- %s", job["title"][:40], exc)
+        result = {
+            "url": job["url"],
+            "title": job["title"],
+            "site": job["site"],
+            "status": "error",
+            "attempts": 0,
+            "path": None,
+            "pdf_path": None,
+            "timings": {"generation_seconds": 0.0, "judge_seconds": 0.0, "attempts": []},
+            "error": str(exc),
+        }
+
+    try:
+        conn = get_connection()
+        now = datetime.now(timezone.utc).isoformat()
+        if result["status"] in _SUCCESS_STATUSES:
+            conn.execute(
+                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                (result["path"], now, result["url"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                (result["url"],),
+            )
+        conn.commit()
+    except Exception as exc:
+        result["status"] = "error"
+        result["error"] = str(exc)
+        log.error("Failed to persist tailoring result for %s -- %s", job["title"][:40], exc)
+
+    result["elapsed_seconds"] = time.perf_counter() - started
+    return result
+
+
+def _log_tailor_completion(completed: int, total: int, result: dict, started_at: float) -> None:
+    """Emit a per-job completion line with generation/judge timing."""
+    elapsed = time.time() - started_at
+    rate = completed / elapsed if elapsed > 0 else 0
+    timings = result.get("timings", {})
+    generation_seconds = float(timings.get("generation_seconds", 0.0) or 0.0)
+    judge_seconds = float(timings.get("judge_seconds", 0.0) or 0.0)
+    total_seconds = float(result.get("elapsed_seconds", generation_seconds + judge_seconds) or 0.0)
+    log.info(
+        "%d/%d [%s] attempts=%s | gen=%.1fs judge=%.1fs total=%.1fs | %.1f jobs/min | %s",
+        completed,
+        total,
+        result["status"].upper(),
+        result.get("attempts", "?"),
+        generation_seconds,
+        judge_seconds,
+        total_seconds,
+        rate * 60,
+        result["title"][:40],
+    )
+
+
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 
-def run_tailoring(min_score: int = 7, limit: Optional[int] = None, validation_mode: str = "normal") -> dict:
+def run_tailoring(
+    min_score: int = 7,
+    limit: Optional[int] = None,
+    validation_mode: str = "normal",
+    workers: int = 1,
+) -> dict:
     """Generate tailored resumes for high-scoring jobs.
 
     Args:
         min_score:       Minimum fit_score to tailor for.
         limit:           Maximum jobs to process. `None` or `<= 0` means unlimited.
         validation_mode: "strict", "normal", or "lenient".
+        workers:         Number of jobs to tailor concurrently.
 
     Returns:
         {"approved": int, "failed": int, "errors": int, "elapsed": float}
@@ -495,106 +646,62 @@ def run_tailoring(min_score: int = 7, limit: Optional[int] = None, validation_mo
         log.info("No untailored jobs with score >= %d.", min_score)
         return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
 
+    workers = max(1, workers)
     TAILORED_DIR.mkdir(parents=True, exist_ok=True)
-    log.info("Tailoring resumes for %d jobs (score >= %d)...", len(jobs), min_score)
+    log.info(
+        "Tailoring resumes for %d jobs (score >= %d, workers=%d)...",
+        len(jobs),
+        min_score,
+        min(workers, len(jobs)),
+    )
     t0 = time.time()
     completed = 0
     stats: dict[str, int] = {"approved": 0, "failed_validation": 0, "failed_judge": 0, "error": 0}
-    _success_statuses = {"approved", "approved_with_judge_warning"}
-
-    for job in jobs:
-        completed += 1
-        try:
-            tailored, report = tailor_resume(resume_text, job, profile, validation_mode=validation_mode)
-
-            # Build safe filename prefix
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            prefix = f"{safe_site}_{safe_title}"
-
-            # Save tailored resume text
-            txt_path = TAILORED_DIR / f"{prefix}.txt"
-            txt_path.write_text(tailored, encoding="utf-8")
-
-            # Save job description for traceability
-            job_path = TAILORED_DIR / f"{prefix}_JOB.txt"
-            job_desc = (
-                f"Title: {job['title']}\n"
-                f"Company: {job['site']}\n"
-                f"Location: {job.get('location', 'N/A')}\n"
-                f"Score: {job.get('fit_score', 'N/A')}\n"
-                f"URL: {job['url']}\n\n"
-                f"{job.get('full_description', '')}"
-            )
-            job_path.write_text(job_desc, encoding="utf-8")
-
-            # Save validation report
-            report_path = TAILORED_DIR / f"{prefix}_REPORT.json"
-            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
-            # Generate PDF for approved resumes (best-effort)
-            # "approved_with_judge_warning" is also a success — resume was generated.
-            pdf_path = None
-            if report["status"] in ("approved", "approved_with_judge_warning"):
-                try:
-                    from applypilot.scoring.pdf import convert_to_pdf
-
-                    pdf_path = str(convert_to_pdf(txt_path))
-                except Exception:
-                    log.debug("PDF generation failed for %s", txt_path, exc_info=True)
-
-            result = {
-                "url": job["url"],
-                "path": str(txt_path),
-                "pdf_path": pdf_path,
-                "title": job["title"],
-                "site": job["site"],
-                "status": report["status"],
-                "attempts": report["attempts"],
-            }
-        except Exception as e:
-            result = {
-                "url": job["url"],
-                "title": job["title"],
-                "site": job["site"],
-                "status": "error",
-                "attempts": 0,
-                "path": None,
-                "pdf_path": None,
-            }
-            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
-
-        try:
-            now = datetime.now(timezone.utc).isoformat()
-            if result["status"] in _success_statuses:
-                conn.execute(
-                    "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                    "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                    (result["path"], now, result["url"]),
-                )
-            else:
-                conn.execute(
-                    "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                    (result["url"],),
-                )
-            conn.commit()
-        except Exception as e:
-            result["status"] = "error"
-            log.error("Failed to persist tailoring result for %s -- %s", job["title"][:40], e)
-
-        stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
-
-        elapsed = time.time() - t0
-        rate = completed / elapsed if elapsed > 0 else 0
-        log.info(
-            "%d/%d [%s] attempts=%s | %.1f jobs/min | %s",
-            completed,
-            len(jobs),
-            result["status"].upper(),
-            result.get("attempts", "?"),
-            rate * 60,
-            result["title"][:40],
+    if workers == 1 or len(jobs) == 1:
+        results = (
+            _process_tailor_job(resume_text, job, profile, validation_mode=validation_mode)
+            for job in jobs
         )
+        for result in results:
+            completed += 1
+            stats_key = "approved" if result["status"] in _SUCCESS_STATUSES else result["status"]
+            stats[stats_key] = stats.get(stats_key, 0) + 1
+            _log_tailor_completion(completed, len(jobs), result, t0)
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, len(jobs)), thread_name_prefix="tailor-worker") as pool:
+            future_to_job = {
+                pool.submit(
+                    bind_current_llm_cost_context(_process_tailor_job),
+                    resume_text,
+                    job,
+                    profile,
+                    validation_mode,
+                ): job
+                for job in jobs
+            }
+            for future in as_completed(future_to_job):
+                job = future_to_job[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    log.exception("Tailoring crashed for %s", job["title"][:40])
+                    result = {
+                        "url": job["url"],
+                        "title": job["title"],
+                        "site": job["site"],
+                        "status": "error",
+                        "attempts": 0,
+                        "path": None,
+                        "pdf_path": None,
+                        "timings": {"generation_seconds": 0.0, "judge_seconds": 0.0, "attempts": []},
+                        "elapsed_seconds": 0.0,
+                        "error": str(exc),
+                    }
+
+                completed += 1
+                stats_key = "approved" if result["status"] in _SUCCESS_STATUSES else result["status"]
+                stats[stats_key] = stats.get(stats_key, 0) + 1
+                _log_tailor_completion(completed, len(jobs), result, t0)
 
     elapsed = time.time() - t0
     log.info(

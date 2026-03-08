@@ -1,9 +1,17 @@
+from concurrent.futures import ThreadPoolExecutor
 import io
 
 from rich.console import Console
 
 from applypilot import config
-from applypilot.llm_cost import LLMCostTracker, clear_llm_cost_tracker, install_llm_cost_tracker, record_llm_cost_estimate
+from applypilot.llm_cost import (
+    LLMCostTracker,
+    bind_current_llm_cost_context,
+    clear_llm_cost_tracker,
+    install_llm_cost_tracker,
+    llm_cost_stage,
+    record_llm_cost_estimate,
+)
 from applypilot.runner import pipeline as pipeline_module
 from applypilot.runner.pipeline_dashboard import PipelineDashboard
 
@@ -71,3 +79,22 @@ def test_pipeline_dashboard_refresh_reads_tracker_costs(monkeypatch, tmp_path) -
     assert "LLM est." in rendered
     assert "$0.420" in rendered
     assert "unpriced" in rendered
+
+
+def test_bind_current_llm_cost_context_preserves_stage_in_worker_thread() -> None:
+    tracker = LLMCostTracker(stages=("tailor",))
+    install_llm_cost_tracker(tracker)
+
+    try:
+        with llm_cost_stage("tailor"):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(bind_current_llm_cost_context(lambda: record_llm_cost_estimate(0.42)))
+                future.result()
+    finally:
+        clear_llm_cost_tracker(tracker)
+
+    snapshot = tracker.snapshot()
+
+    assert snapshot["stage_costs"]["tailor"] == 0.42
+    assert snapshot["stage_calls"]["tailor"] == 1
+    assert snapshot["total_cost"] == 0.42

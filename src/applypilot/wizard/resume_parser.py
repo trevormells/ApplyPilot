@@ -155,7 +155,7 @@ def extract_resume_data(resume_text: str) -> tuple[Optional[ExtractedResume], di
         client = get_client()
         prompt = EXTRACTION_PROMPT + resume_text
 
-        response = client.ask(prompt, temperature=0.0, max_tokens=2048)
+        response = client.ask(prompt)
 
         # Parse JSON from response
         try:
