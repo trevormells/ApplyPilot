@@ -9,6 +9,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
 from applypilot.database import get_connection
@@ -190,12 +191,12 @@ def generate_cover_letter(
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 
-def run_cover_letters(min_score: int = 7, limit: int = 20, validation_mode: str = "normal") -> dict:
+def run_cover_letters(min_score: int = 7, limit: Optional[int] = None, validation_mode: str = "normal") -> dict:
     """Generate cover letters for high-scoring jobs that have tailored resumes.
 
     Args:
         min_score:       Minimum fit_score threshold.
-        limit:           Maximum jobs to process.
+        limit:           Maximum jobs to process. `None` or `<= 0` means unlimited.
         validation_mode: "strict", "normal", or "lenient".
 
     Returns:
@@ -206,15 +207,19 @@ def run_cover_letters(min_score: int = 7, limit: int = 20, validation_mode: str 
     conn = get_connection()
 
     # Fetch jobs that have tailored resumes but no cover letter yet
-    jobs = conn.execute(
+    query = (
         "SELECT * FROM jobs "
         "WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
         "AND full_description IS NOT NULL "
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
         "AND COALESCE(cover_attempts, 0) < ? "
-        "ORDER BY fit_score DESC LIMIT ?",
-        (min_score, MAX_ATTEMPTS, limit),
-    ).fetchall()
+        "ORDER BY fit_score DESC"
+    )
+    params: list[object] = [min_score, MAX_ATTEMPTS]
+    if limit is not None and limit > 0:
+        query += " LIMIT ?"
+        params.append(limit)
+    jobs = conn.execute(query, params).fetchall()
 
     if not jobs:
         log.info("No jobs needing cover letters (score >= %d).", min_score)

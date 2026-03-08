@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from applypilot.config import DB_PATH, DEFAULTS, load_blocked_sites
 
@@ -453,7 +454,10 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict], site: str, strategy: 
 
 
 def get_jobs_by_stage(
-    conn: sqlite3.Connection | None = None, stage: str = "discovered", min_score: int | None = None, limit: int = 100
+    conn: sqlite3.Connection | None = None,
+    stage: str = "discovered",
+    min_score: int | None = None,
+    limit: Optional[int] = None,
 ) -> list[dict]:
     """Fetch jobs filtered by pipeline stage.
 
@@ -461,7 +465,7 @@ def get_jobs_by_stage(
         conn: Database connection. Uses get_connection() if None.
         stage: One of "discovered", "enriched", "scored", "tailored", "applied".
         min_score: Minimum fit_score filter (only relevant for scored+ stages).
-        limit: Maximum number of rows to return.
+        limit: Maximum number of rows to return. `None` or `<= 0` means unlimited.
 
     Returns:
         List of job dicts.
@@ -499,7 +503,7 @@ def get_jobs_by_stage(
         params.append(min_score)
 
     query = f"SELECT * FROM jobs WHERE {where} ORDER BY fit_score DESC NULLS LAST, discovered_at DESC"
-    if limit > 0:
+    if limit is not None and limit > 0:
         query += " LIMIT ?"
         params.append(limit)
 

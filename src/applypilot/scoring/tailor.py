@@ -14,6 +14,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
@@ -473,12 +474,12 @@ def tailor_resume(
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 
-def run_tailoring(min_score: int = 7, limit: int = 20, validation_mode: str = "normal") -> dict:
+def run_tailoring(min_score: int = 7, limit: Optional[int] = None, validation_mode: str = "normal") -> dict:
     """Generate tailored resumes for high-scoring jobs.
 
     Args:
         min_score:       Minimum fit_score to tailor for.
-        limit:           Maximum jobs to process.
+        limit:           Maximum jobs to process. `None` or `<= 0` means unlimited.
         validation_mode: "strict", "normal", or "lenient".
 
     Returns:
